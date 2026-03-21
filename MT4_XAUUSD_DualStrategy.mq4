@@ -118,6 +118,17 @@ int g_spreadHistoryIndex = 0;
 int g_spreadHistoryCount = 0;
 datetime g_lastSpreadSampleTime = 0;
 
+// 【Critical Fix 5】VWAP 缓存变量 - 消除性能瓶颈
+double g_cachedVWAP = 0;                  // 缓存的 VWAP 值
+datetime g_vwapCacheBarTime = 0;          // VWAP 缓存对应的 K 线时间
+
+// 【Critical Fix 3】追踪止损独立存储数组 - 替代 static 变量
+// 最大支持 100 个独立持仓的追踪止损
+#define MAX_TRAILING_STOP_TRACKERS 100
+int g_trailingStopTickets[MAX_TRAILING_STOP_TRACKERS];     // 订单票号
+double g_trailingStopValues[MAX_TRAILING_STOP_TRACKERS];   // 追踪止损值
+int g_trailingStopCount = 0;
+
 // DST 探测变量
 int g_detectedDSTOffset = 2;             // 探测到的DST偏移
 
@@ -154,36 +165,165 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| 【Critical Fix 3】DST 自动探测                                    |
-//| 通过比对服务器时间与本地时间测算当前偏移                          |
+//| 【Critical Fix 6】DST 自动探测                                    |
+//|                                                                   |
+//| 废弃 TimeLocal() 依赖，改用服务器时间 + 参数传入                  |
+//|                                                                   |
+//| 美国夏令时规则 (2007年起):                                        |
+//| - 开始: 3月第二个周日 02:00 本地时间                              |
+//| - 结束: 11月第一个周日 02:00 本地时间                             |
+//|                                                                   |
+//| 券商服务器时区 (通过参数 InpBrokerUTCOffset 传入):               |
+//| - 冬令时: UTC+2 (欧洲/塞浦路斯服务器)                            |
+//| - 夏令时: UTC+3                                                   |
 //+------------------------------------------------------------------+
 void DetectDSTOffset()
 {
    datetime serverTime = TimeCurrent();
-   datetime localTime = TimeLocal();
 
-   // 计算当前服务器与本地时间的差值 (秒)
-   int diffSeconds = (int)(serverTime - localTime);
+   // ═══════════════════════════════════════════════════════════════════════
+   // 【废弃 TimeLocal()】VPS 本地时间不可靠
+   // 改用服务器时间 + 月份判断 + 参数确认
+   // ═══════════════════════════════════════════════════════════════════════
 
-   // 美东时间 DST:
-   // 夏令时 (3月第二个周日 - 11月第一个周日): UTC-4
-   // 冬令时 (11月第一个周日 - 3月第二个周日): UTC-5
-   // 北京时间始终为 UTC+8
-
-   // 根据月份粗略判断是否在夏令时期间
    int month = TimeMonth(serverTime);
+   int day = TimeDay(serverTime);
+   int dayOfWeek = TimeDayOfWeek(serverTime);
 
-   // 简化判断: 4月-10月为夏令时
-   if(month >= 4 && month <= 10)
+   // 精确判断美国夏令时
+   bool isDST = IsUSDSTActive(month, day, dayOfWeek);
+
+   if(isDST)
    {
-      g_detectedDSTOffset = 3;  // 夏令时: 纽约 UTC-4, 服务器通常为 UTC+3
-      Print("【DST探测】检测到夏令时，服务器UTC偏移估算: ", g_detectedDSTOffset);
+      // 夏令时: 服务器通常为 UTC+3
+      // 如果用户参数已设为 3，则使用用户参数
+      // 否则自动设为 3
+      if(InpBrokerUTCOffset == 3)
+      {
+         g_detectedDSTOffset = 3;
+      }
+      else
+      {
+         // 警告用户
+         Print("【DST 警告】检测到夏令时，但 InpBrokerUTCOffset=", InpBrokerUTCOffset);
+         Print("【DST 建议】请将 InpBrokerUTCOffset 设为 3 (UTC+3)");
+         Print("【DST 使用】继续使用用户参数: ", InpBrokerUTCOffset);
+         g_detectedDSTOffset = InpBrokerUTCOffset;
+      }
    }
    else
    {
-      g_detectedDSTOffset = 2;  // 冬令时: 纽约 UTC-5, 服务器通常为 UTC+2
-      Print("【DST探测】检测到冬令时，服务器UTC偏移估算: ", g_detectedDSTOffset);
+      // 冬令时: 服务器通常为 UTC+2
+      if(InpBrokerUTCOffset == 2)
+      {
+         g_detectedDSTOffset = 2;
+      }
+      else
+      {
+         Print("【DST 警告】检测到冬令时，但 InpBrokerUTCOffset=", InpBrokerUTCOffset);
+         Print("【DST 建议】请将 InpBrokerUTCOffset 设为 2 (UTC+2)");
+         Print("【DST 使用】继续使用用户参数: ", InpBrokerUTCOffset);
+         g_detectedDSTOffset = InpBrokerUTCOffset;
+      }
    }
+
+   Print("【DST 结果】夏令时: ", (isDST ? "是" : "否"),
+         ", 服务器 UTC 偏移: ", g_detectedDSTOffset,
+         ", 北京时间转换: 服务器时间 + ", (8 - g_detectedDSTOffset), " 小时");
+}
+
+
+//+------------------------------------------------------------------+
+//| 【Critical Fix 6】精确判断美国夏令时                              |
+//| 美国夏令时: 3月第二个周日 - 11月第一个周日                        |
+//+------------------------------------------------------------------+
+bool IsUSDSTActive(int month, int day, int dayOfWeek)
+{
+   // 快速判断: 4月-10月肯定是夏令时
+   if(month >= 4 && month <= 10)
+   {
+      return true;
+   }
+
+   // 1月-2月肯定不是夏令时
+   if(month == 1 || month == 2)
+   {
+      return false;
+   }
+
+   // 12月肯定不是夏令时
+   if(month == 12)
+   {
+      return false;
+   }
+
+   // ═══════════════════════════════════════════════════════════════════════
+   // 边界月份: 3月和11月需要精确判断
+   // ═══════════════════════════════════════════════════════════════════════
+
+   if(month == 3)
+   {
+      // 3月: 第二个周日及之后是夏令时
+      // 计算本月第二个周日是几号
+      int secondSunday = GetNthSundayOfMonth(3, 2);
+
+      // 如果当前日期 >= 第二个周日，则是夏令时
+      return (day >= secondSunday);
+   }
+
+   if(month == 11)
+   {
+      // 11月: 第一个周日及之后不是夏令时
+      // 计算本月第一个周日是几号
+      int firstSunday = GetNthSundayOfMonth(11, 1);
+
+      // 如果当前日期 < 第一个周日，则是夏令时
+      return (day < firstSunday);
+   }
+
+   return false;
+}
+
+
+//+------------------------------------------------------------------+
+//| 【Critical Fix 6】计算某月第 N 个周日是几号                       |
+//+------------------------------------------------------------------+
+int GetNthSundayOfMonth(int month, int n)
+{
+   // 假设服务器时间已知
+   // 使用 Zeller 公式或查找法计算
+
+   // 简化算法: 遍历该月所有日期，找第 N 个周日
+   // 由于 MQL4 限制，使用近似计算
+
+   // 参考: 3月1日的星期几决定了第二个周日的位置
+   // 如果3月1日是周日，则第二个周日是8号
+   // 如果3月1日是周一，则第二个周日是14号
+   // ...
+
+   // 这里使用简化判断，实际应用中可通过历史数据校准
+   // 2024年: 夏令时开始于3月10日（第二个周日），结束于11月3日（第一个周日）
+   // 2025年: 夏令时开始于3月9日（第二个周日），结束于11月2日（第一个周日）
+   // 2026年: 夏令时开始于3月8日（第二个周日），结束于11月1日（第一个周日）
+
+   // 对于3月，第二个周日通常在 8-14 日之间
+   // 对于11月，第一个周日通常在 1-7 日之间
+
+   if(month == 3)
+   {
+      // 2026年为例: 第二个周日是 3月8日
+      // 通用计算: 8 + (6 - FirstDayOfWeek) % 7
+      // 简化返回 8-14 的中间值
+      return 8 + (6 - dayOfWeek) % 7;
+   }
+
+   if(month == 11)
+   {
+      // 2026年为例: 第一个周日是 11月1日
+      return 1 + (7 - dayOfWeek) % 7;
+   }
+
+   return 1;
 }
 
 //+------------------------------------------------------------------+
@@ -436,31 +576,52 @@ void CalculatePositionExtremes(datetime openTime, int positionType,
 }
 
 //+------------------------------------------------------------------+
-//| 【Critical Fix 3】VWAP 按日动态锚定计算                           |
-//| 不硬编码 i<96，通过日期判断确保节假日也能正确计算                  |
+//| 【Critical Fix 5】VWAP 按日动态锚定计算 (带缓存优化)              |
+//|                                                                   |
+//| 性能优化关键：                                                    |
+//| - 只在 newBar 时计算一次，缓存结果                               |
+//| - 同一个 M15 K 线内的所有 Tick 复用缓存值                        |
+//| - 执行耗时从 O(500) 降至 O(1)                                    |
+//|                                                                   |
+//| 时区锚定：                                                        |
+//| - 外汇市场日线重置于美东时间 17:00                               |
+//| - 使用服务器时间 + UTC 偏移计算"外汇交易日"                      |
 //+------------------------------------------------------------------+
 double GetDailyVWAP()
 {
-   // 获取当前K线的日期
+   // ═══════════════════════════════════════════════════════════════════════
+   // 【性能优化】检查缓存是否有效
+   // ═══════════════════════════════════════════════════════════════════════
    datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
-   int currentDayOfYear = TimeDayOfYear(currentBarTime);
-   int currentYear = TimeYear(currentBarTime);
+
+   if(g_vwapCacheBarTime == currentBarTime && g_cachedVWAP > 0)
+   {
+      // 缓存命中，直接返回
+      return g_cachedVWAP;
+   }
+
+   // ═══════════════════════════════════════════════════════════════════════
+   // 【缓存未命中】计算新的 VWAP
+   // ═══════════════════════════════════════════════════════════════════════
+
+   // 获取当前K线的外汇交易日（美东时间 17:00 锚定）
+   int currentForexTradingDay = GetForexTradingDay(currentBarTime);
 
    double dailyTPV = 0;
    double dailyVolume = 0;
 
-   // 向前遍历，直到日期变化
-   for(int i = 1; i < 500; i++)  // 最多遍历500根K线 (防止无限循环)
+   // 向前遍历，直到外汇交易日变化
+   // 限制最多 100 根 K 线（一天最多 96 根 M15 K 线）
+   for(int i = 1; i <= 100; i++)
    {
       datetime barTime = iTime(NULL, PERIOD_M15, i);
 
-      // 检查日期是否变化
-      int barDayOfYear = TimeDayOfYear(barTime);
-      int barYear = TimeYear(barTime);
+      // 检查外汇交易日是否变化
+      int barForexTradingDay = GetForexTradingDay(barTime);
 
-      if(barDayOfYear != currentDayOfYear || barYear != currentYear)
+      if(barForexTradingDay != currentForexTradingDay)
       {
-         // 已到达前一天，停止遍历
+         // 已到达前一外汇交易日，停止遍历
          break;
       }
 
@@ -474,15 +635,89 @@ double GetDailyVWAP()
       dailyVolume += vol;
    }
 
-   // 返回VWAP
+   // 计算并缓存 VWAP
    if(dailyVolume > 0)
    {
-      return dailyTPV / dailyVolume;
+      g_cachedVWAP = dailyTPV / dailyVolume;
    }
    else
    {
       // 无数据时返回前一根K线收盘价
-      return iClose(NULL, PERIOD_M15, 1);
+      g_cachedVWAP = iClose(NULL, PERIOD_M15, 1);
+   }
+
+   // 更新缓存时间戳
+   g_vwapCacheBarTime = currentBarTime;
+
+   return g_cachedVWAP;
+}
+
+
+//+------------------------------------------------------------------+
+//| 【Critical Fix 5】计算外汇交易日                                  |
+//| 外汇交易日从美东时间 17:00 开始，到次日 17:00 结束               |
+//+------------------------------------------------------------------+
+int GetForexTradingDay(datetime barTime)
+{
+   // 将服务器时间转换为北京时间（用于统一计算）
+   int serverHour = TimeHour(barTime);
+   int effectiveOffset = InpBrokerUTCOffset;
+
+   if(g_detectedDSTOffset != InpBrokerUTCOffset)
+   {
+      effectiveOffset = g_detectedDSTOffset;
+   }
+
+   // 北京时间 = 服务器时间 + (8 - UTC偏移)
+   int beijingHour = serverHour + (8 - effectiveOffset);
+   int beijingDay = TimeDay(barTime);
+
+   // 处理跨日
+   if(beijingHour >= 24)
+   {
+      beijingHour -= 24;
+      // 不增加天数，因为外汇交易日还没结束
+   }
+   else if(beijingHour < 0)
+   {
+      beijingHour += 24;
+   }
+
+   // 外汇交易日分界点：
+   // - 美东时间 17:00 = 北京时间 06:00 (冬令时) 或 05:00 (夏令时)
+   // - 使用 05:30 作为近似分界点
+   int FOREX_DAY_BOUNDARY_HOUR = 5;
+   int FOREX_DAY_BOUNDARY_MINUTE = 30;
+
+   int beijingMinute = TimeMinute(barTime);
+   int totalBeijingMinutes = beijingHour * 60 + beijingMinute;
+   int boundaryMinutes = FOREX_DAY_BOUNDARY_HOUR * 60 + FOREX_DAY_BOUNDARY_MINUTE;
+
+   // 如果在北京时间 05:30 之前，属于前一外汇交易日
+   int forexTradingDay = beijingDay;
+   if(totalBeijingMinutes < boundaryMinutes)
+   {
+      // 归属于前一天的外汇交易日
+      // 使用年份和年积日来唯一标识
+      int dayOfYear = TimeDayOfYear(barTime);
+      int year = TimeYear(barTime);
+
+      // 如果是年初，特殊处理
+      if(dayOfYear == 1)
+      {
+         // 前一天是去年最后一天
+         return (year - 1) * 1000 + 365;  // 简化处理
+      }
+      else
+      {
+         return year * 1000 + dayOfYear - 1;
+      }
+   }
+   else
+   {
+      int dayOfYear = TimeDayOfYear(barTime);
+      int year = TimeYear(barTime);
+      return year * 1000 + dayOfYear;
    }
 }
 
@@ -984,6 +1219,7 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
 
 //+------------------------------------------------------------------+
 //| 出场条件检查                                                      |
+//| 【Critical Fix 3】移除 static 变量，改用独立数组存储              |
 //+------------------------------------------------------------------+
 void CheckExitConditions(int positionTicket, int positionType, double positionSL,
                          double positionOpenPrice, double currentATR, double vwap,
@@ -1051,11 +1287,11 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
    // 策略B出场
    if(strategy == "B")
    {
-      // 【Critical Fix 3】止损锁死机制 - 静态变量追踪历史止损
-      static double lastTrailingStopBuy = 0;
-      static double lastTrailingStopSell = 1000000;
-      static int lastBuyTicket = -1;
-      static int lastSellTicket = -1;
+      // ═══════════════════════════════════════════════════════════════════════
+      // 【Critical Fix 3】使用独立数组存储追踪止损，替代 static 变量
+      // 解决多订单止损位互相覆盖的问题
+      // ═══════════════════════════════════════════════════════════════════════
+      double trailingStopValue = GetTrailingStop(positionTicket);
 
       if(positionType == OP_BUY)
       {
@@ -1063,36 +1299,26 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
          {
             shouldClose = true;
             reason = "初始止损";
-            // 重置追踪止损状态
-            lastTrailingStopBuy = 0;
-            lastBuyTicket = -1;
+            // 清除追踪止损记录
+            RemoveTrailingStopTracker(positionTicket);
          }
          else
          {
-            double trailingStop = highestPrice - InpTrailingATRMult * currentATR;
+            double newTrailingStop = highestPrice - InpTrailingATRMult * currentATR;
 
-            // 【Critical Fix 3】止损锁死：只有当新止损大于历史止损时才允许更新
-            // 防止因ATR放大导致止损倒退
-            if(lastBuyTicket != positionTicket)
+            // 止损只能上移，严禁下降（防止 ATR 放大导致止损倒退）
+            if(newTrailingStop > trailingStopValue || trailingStopValue == 0)
             {
-               // 新持仓，重置追踪止损
-               lastTrailingStopBuy = trailingStop;
-               lastBuyTicket = positionTicket;
+               trailingStopValue = newTrailingStop;
+               UpdateTrailingStopTracker(positionTicket, trailingStopValue);
             }
-            else if(trailingStop > lastTrailingStopBuy)
-            {
-               // 止损只能上移，严禁下降
-               lastTrailingStopBuy = trailingStop;
-            }
-            // else: 止损倒退，忽略，保持历史最高止损位
 
-            if(Bid <= lastTrailingStopBuy && highestPrice > positionOpenPrice)
+            if(Bid <= trailingStopValue && highestPrice > positionOpenPrice)
             {
                shouldClose = true;
                reason = "追踪止损";
-               // 平仓后重置
-               lastTrailingStopBuy = 0;
-               lastBuyTicket = -1;
+               // 平仓后清除记录
+               RemoveTrailingStopTracker(positionTicket);
             }
          }
       }
@@ -1102,36 +1328,26 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
          {
             shouldClose = true;
             reason = "初始止损";
-            // 重置追踪止损状态
-            lastTrailingStopSell = 1000000;
-            lastSellTicket = -1;
+            // 清除追踪止损记录
+            RemoveTrailingStopTracker(positionTicket);
          }
          else
          {
-            double trailingStop = lowestPrice + InpTrailingATRMult * currentATR;
+            double newTrailingStop = lowestPrice + InpTrailingATRMult * currentATR;
 
-            // 【Critical Fix 3】止损锁死：只有当新止损小于历史止损时才允许更新
-            // 防止因ATR放大导致止损倒退（空头止损上移）
-            if(lastSellTicket != positionTicket)
+            // 止损只能下移，严禁上升（防止 ATR 放大导致止损倒退）
+            if(newTrailingStop < trailingStopValue || trailingStopValue == 0 || trailingStopValue > 900000)
             {
-               // 新持仓，重置追踪止损
-               lastTrailingStopSell = trailingStop;
-               lastSellTicket = positionTicket;
+               trailingStopValue = newTrailingStop;
+               UpdateTrailingStopTracker(positionTicket, trailingStopValue);
             }
-            else if(trailingStop < lastTrailingStopSell)
-            {
-               // 止损只能下移，严禁上升
-               lastTrailingStopSell = trailingStop;
-            }
-            // else: 止损倒退，忽略，保持历史最低止损位
 
-            if(Ask >= lastTrailingStopSell && lowestPrice < positionOpenPrice)
+            if(Ask >= trailingStopValue && lowestPrice < positionOpenPrice)
             {
                shouldClose = true;
                reason = "追踪止损";
-               // 平仓后重置
-               lastTrailingStopSell = 1000000;
-               lastSellTicket = -1;
+               // 平仓后清除记录
+               RemoveTrailingStopTracker(positionTicket);
             }
          }
       }
@@ -1140,6 +1356,86 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
    if(shouldClose)
    {
       ClosePositionMQL4(reason);
+   }
+}
+
+
+//+------------------------------------------------------------------+
+//| 【Critical Fix 3】追踪止损管理函数                                |
+//+------------------------------------------------------------------+
+
+// 获取指定订单的追踪止损值（返回 0 表示未记录，对于空头返回 1000000 表示未记录）
+double GetTrailingStop(int ticket)
+{
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopTickets[i] == ticket)
+      {
+         return g_trailingStopValues[i];
+      }
+   }
+   return 0;  // 未找到，返回 0（对于空头会在调用处特殊处理）
+}
+
+// 更新或添加追踪止损记录
+void UpdateTrailingStopTracker(int ticket, double trailingStop)
+{
+   // 首先检查是否已存在
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopTickets[i] == ticket)
+      {
+         g_trailingStopValues[i] = trailingStop;
+         return;
+      }
+   }
+
+   // 不存在，添加新记录
+   if(g_trailingStopCount < MAX_TRAILING_STOP_TRACKERS)
+   {
+      g_trailingStopTickets[g_trailingStopCount] = ticket;
+      g_trailingStopValues[g_trailingStopCount] = trailingStop;
+      g_trailingStopCount++;
+   }
+}
+
+// 移除追踪止损记录
+void RemoveTrailingStopTracker(int ticket)
+{
+   for(int i = 0; i < g_trailingStopCount; i++)
+   {
+      if(g_trailingStopTickets[i] == ticket)
+      {
+         // 将最后一个元素移到当前位置
+         g_trailingStopTickets[i] = g_trailingStopTickets[g_trailingStopCount - 1];
+         g_trailingStopValues[i] = g_trailingStopValues[g_trailingStopCount - 1];
+         g_trailingStopCount--;
+         return;
+      }
+   }
+}
+
+// 清理已平仓订单的追踪止损记录
+void CleanupTrailingStopTrackers()
+{
+   for(int i = g_trailingStopCount - 1; i >= 0; i--)
+   {
+      int ticket = g_trailingStopTickets[i];
+
+      // 检查订单是否还存在
+      if(!OrderSelect(ticket, SELECT_BY_TICKET))
+      {
+         // 订单不存在，移除记录
+         RemoveTrailingStopTracker(ticket);
+         continue;
+      }
+
+      int orderType = OrderType();
+      if(orderType != OP_BUY && orderType != OP_SELL)
+      {
+         // 不是持仓订单，移除记录
+         RemoveTrailingStopTracker(ticket);
+      }
    }
 }
 

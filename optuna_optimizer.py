@@ -162,7 +162,8 @@ def calculate_calmar_ratio(
 
     Calmar = 年化收益率 / 最大回撤
 
-    修复:
+    【Critical Fix 8】修复:
+    - 黄金/外汇市场年度交易日约 260 天（非股票市场的 252 天）
     - 使用日度收益率序列计算年化收益
     - 避免单值收益率导致的指数爆炸
 
@@ -192,10 +193,17 @@ def calculate_calmar_ratio(
     if n_days <= 0:
         return 0.0
 
-    # 年化因子（假设252个交易日）
-    # 使用复合年化: (1 + r)^{252/n_days} - 1
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【Critical Fix 8】黄金/外汇市场年度交易日 = 260 天
+    # 股票市场有周末和节假日休市，约 252 交易日
+    # 黄金/外汇市场周末休市但节假日较少，约 260 交易日
+    # ═══════════════════════════════════════════════════════════════════════
+    FOREX_TRADING_DAYS_PER_YEAR = 260
+
+    # 年化因子
+    # 使用复合年化: (1 + r)^{260/n_days} - 1
     # 防止极端值：限制年化因子范围
-    annual_factor = min(252 / max(n_days, 1), 10.0)  # 上限10年
+    annual_factor = min(FOREX_TRADING_DAYS_PER_YEAR / max(n_days, 1), 10.0)  # 上限10年
 
     if total_return > -1:  # 防止负收益导致数值错误
         annualized_return = (1 + total_return) ** annual_factor - 1
@@ -316,15 +324,41 @@ def calculate_custom_fitness(
         # 直接返回负值，拒绝该参数组合
         return -1000.0 - (min_profitable_win - avg_win)
 
-    # ========== 平滑惩罚函数 ==========
-    # 修复: 使用连续平滑衰减，而非断崖式惩罚
-    # 这样贝叶斯模型的代理函数空间更平滑
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【Critical Fix 8】平滑指数级惩罚函数
+    # 替代断崖式惩罚，使贝叶斯模型空间更平滑
+    # ═══════════════════════════════════════════════════════════════════════
 
-    # 交易次数衰减因子 (平滑)
-    trade_factor = min(1.0, (total_trades / min_trades) ** 0.5) if min_trades > 0 else 1.0
+    # 交易次数惩罚：使用指数衰减而非断崖式
+    # trade_factor = exp(-decay_rate * (1 - trades/min_trades))
+    # 当 trades >= min_trades 时，trade_factor = 1.0
+    # 当 trades < min_trades 时，trade_factor 平滑衰减
+    if min_trades > 0:
+        trade_ratio = total_trades / min_trades
+        if trade_ratio >= 1.0:
+            trade_factor = 1.0
+        else:
+            # 指数衰减：衰减率 = 2.0，使得 50% 交易量时惩罚约 40%
+            decay_rate = 2.0
+            trade_factor = np.exp(-decay_rate * (1.0 - trade_ratio))
+    else:
+        trade_factor = 1.0
 
-    # 回撤衰减因子 (平滑)
-    dd_factor = max(0.1, 1.0 - max_drawdown / 100) if max_drawdown > 0 else 1.0
+    # 回撤惩罚：使用指数衰减
+    # dd_factor = exp(-decay_rate * dd_ratio)
+    if max_drawdown > 0:
+        # 回撤比例（假设最大可接受回撤为 30%）
+        max_acceptable_dd = 30.0
+        dd_ratio = max_drawdown / max_acceptable_dd
+        if dd_ratio >= 1.0:
+            # 回撤过大，严重惩罚
+            dd_factor = 0.01
+        else:
+            # 指数衰减
+            decay_rate = 3.0
+            dd_factor = np.exp(-decay_rate * dd_ratio)
+    else:
+        dd_factor = 1.0
 
     # ========== 核心适应度计算 ==========
 

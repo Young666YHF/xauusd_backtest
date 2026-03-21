@@ -2,9 +2,10 @@
 技术指标计算模块
 包含: VWAP, Bollinger Bands, Keltner Channels, ATR, RSI, EMA等
 
-【修复2.1】时区严格定义
-- 所有时段判断使用北京时间 (UTC+8)
-- 增加时区校验警告
+【修复3.0】VWAP 时区严格锚定
+- 外汇黄金市场 VWAP 必须锚定于美东时间 17:00 (EST/EDT)
+- 这是全球外汇市场的真实日线重置时间（流动性重置点）
+- 不能使用北京时间 00:00 或任何其他本地时间
 """
 
 import pandas as pd
@@ -12,18 +13,42 @@ import numpy as np
 from typing import Tuple
 import warnings
 
+# 尝试导入 pytz 进行时区处理
+try:
+    import pytz
+    BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+    NEW_YORK_TZ = pytz.timezone('America/New_York')
+    UTC_TZ = pytz.UTC
+    PYTZ_AVAILABLE = True
+except ImportError:
+    PYTZ_AVAILABLE = False
+    BEIJING_TZ = 'Asia/Shanghai'
+    warnings.warn("【警告】pytz 未安装，VWAP 时区锚定可能不准确")
 
-# 北京时区
-BEIJING_TZ = 'Asia/Shanghai'
+
+# 外汇市场日线重置时间 (美东时间)
+# 这是全球黄金市场的流动性重置点
+FOREX_DAILY_RESET_HOUR_ET = 17  # 美东时间 17:00
 
 
 def calculate_vwap(df: pd.DataFrame) -> pd.Series:
     """
     计算VWAP (成交量加权平均价)
-    每日重置
+
+    【修复3.0】按外汇市场真实日线重置时间锚定
+
+    关键修复：
+    - 外汇/黄金市场日线重置时间是美东时间 17:00 (EST/EDT)
+    - 不是北京时间 00:00，不是 UTC 00:00
+    - 这是全球流动性提供商的结算时间点
+
+    时区转换：
+    - 美东时间 17:00 = UTC 22:00 (冬令时 EST, UTC-5)
+    - 美东时间 17:00 = UTC 21:00 (夏令时 EDT, UTC-4)
+    - 美东时间 17:00 = 北京时间次日 06:00 (冬令时) 或 05:00 (夏令时)
 
     Args:
-        df: 包含 'High', 'Low', 'Close', 'Volume' 的DataFrame
+        df: 包含 'High', 'Low', 'Close', 'Volume' 的DataFrame，索引为时间戳
 
     Returns:
         VWAP序列
@@ -31,16 +56,67 @@ def calculate_vwap(df: pd.DataFrame) -> pd.Series:
     # 典型价格
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
 
-    # 按日期分组计算累计VWAP
-    dates = df.index.date
-
     vwap = pd.Series(index=df.index, dtype=float)
 
-    # 获取唯一日期
-    unique_dates = np.unique(dates)
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【修复核心】获取美东时间 17:00 锚定的"交易日"
+    # ═══════════════════════════════════════════════════════════════════════
+
+    if PYTZ_AVAILABLE and df.index.tz is not None:
+        # 如果数据有时区信息，转换为美东时间
+        index_et = df.index.tz_convert(NEW_YORK_TZ)
+
+        # 计算美东时间的小时
+        hour_et = index_et.hour
+
+        # 外汇交易日定义：从美东时间 17:00 开始到次日 17:00
+        # 在 17:00 之前的数据属于"前一天"的交易日
+        # 在 17:00 及之后的数据属于"当天"的交易日
+        trading_date = index_et.normalize()  # 获取日期部分 (00:00)
+
+        # 对于 00:00-16:59 的数据，它们属于前一天的交易日
+        # 对于 17:00-23:59 的数据，它们属于当天的交易日
+        for i in range(len(df)):
+            if hour_et[i] < FOREX_DAILY_RESET_HOUR_ET:
+                # 17:00 之前的数据，归属于前一天的交易日
+                trading_date[i] = trading_date[i] - pd.Timedelta(days=1)
+
+    else:
+        # 无时区信息时，假设数据为北京时间 (UTC+8)
+        # 进行简化处理：美东时间 17:00 = 北京时间次日 05:00 (夏令时) 或 06:00 (冬令时)
+        # 使用近似值：北京时间 05:30 作为分界点（取夏令时和冬令时的中间值）
+        # 这样在大部分情况下误差不超过 30 分钟
+
+        if df.index.tz is None:
+            warnings.warn(
+                "【VWAP 警告】数据无时区信息，假设为北京时间。\n"
+                "VWAP 将在北京时间约 05:30 分界，近似锚定美东时间 17:00。\n"
+                "建议：为数据添加时区信息以获得精确计算。"
+            )
+
+        index_beijing = df.index
+        hour_beijing = index_beijing.hour
+        minute_beijing = index_beijing.minute
+
+        # 将北京时间转换为"交易日"
+        # 外汇交易日从美东 17:00 开始：
+        # - 冬令时：北京时间次日 06:00
+        # - 夏令时：北京时间次日 05:00
+        # 近似使用 05:30 作为全年分界点（平均误差 < 30分钟）
+        trading_date = index_beijing.normalize()
+
+        for i in range(len(df)):
+            total_minutes = hour_beijing[i] * 60 + minute_beijing[i]
+            # 05:30 = 5*60 + 30 = 330 分钟
+            if total_minutes < 330:  # 00:00 - 05:29
+                # 归属于前一天的交易日
+                trading_date[i] = trading_date[i] - pd.Timedelta(days=1)
+
+    # 按交易日分组计算累计 VWAP
+    unique_dates = trading_date.unique()
 
     for date in unique_dates:
-        mask = dates == date
+        mask = trading_date == date
         tp_day = typical_price[mask]
         vol_day = df.loc[mask, 'Volume']
 

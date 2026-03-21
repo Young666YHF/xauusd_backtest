@@ -332,8 +332,25 @@ class NewsEventFilter:
 # 数据转换函数
 # =============================================================================
 def prepare_tick_data(tick_df: pd.DataFrame, ohlcv_df: pd.DataFrame,
-                      interval: str = '15min') -> np.ndarray:
-    """将 Tick DataFrame 转换为纯 Numpy 数组"""
+                      interval: str = '15min',
+                      spread_per_ounce: float = 0.6) -> np.ndarray:
+    """
+    将 Tick DataFrame 转换为纯 Numpy 数组
+
+    【Critical Fix 7】修复微观结构
+    - 优先判断真实 Bid/Ask 字段是否存在
+    - 仅在极端缺乏 Bid/Ask 数据时，使用参数传入的 spread_per_ounce 动态生成
+    - 移除硬编码的 0.3 点差逻辑
+
+    Args:
+        tick_df: Tick 数据 DataFrame
+        ohlcv_df: OHLCV 数据 DataFrame
+        interval: K 线周期
+        spread_per_ounce: 每盎司点差（仅在无 Bid/Ask 数据时使用）
+
+    Returns:
+        Tick 数据数组 (n_ticks, 6)
+    """
     n_ticks = len(tick_df)
     if n_ticks == 0:
         return np.zeros((0, 6), dtype=np.float64)
@@ -341,36 +358,85 @@ def prepare_tick_data(tick_df: pd.DataFrame, ohlcv_df: pd.DataFrame,
     ticks_array = np.zeros((n_ticks, 6), dtype=np.float64)
     ticks_array[:, TICK_TIMESTAMP] = tick_df.index.astype(np.int64).values / 1e9
 
-    if 'bid' in tick_df.columns:
-        ticks_array[:, TICK_BID] = tick_df['bid'].values
-    elif 'Bid' in tick_df.columns:
-        ticks_array[:, TICK_BID] = tick_df['Bid'].values
-    elif 'price' in tick_df.columns:
-        ticks_array[:, TICK_BID] = tick_df['price'].values - 0.3
-    else:
-        ticks_array[:, TICK_BID] = tick_df.iloc[:, 0].values - 0.3
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【Critical Fix 7】优先使用真实 Bid/Ask 数据
+    # ═══════════════════════════════════════════════════════════════════════
 
-    if 'ask' in tick_df.columns:
-        ticks_array[:, TICK_ASK] = tick_df['ask'].values
-    elif 'Ask' in tick_df.columns:
-        ticks_array[:, TICK_ASK] = tick_df['Ask'].values
-    elif 'price' in tick_df.columns:
-        ticks_array[:, TICK_ASK] = tick_df['price'].values + 0.3
-    else:
-        ticks_array[:, TICK_ASK] = tick_df.iloc[:, 0].values + 0.3
+    has_real_bid = False
+    has_real_ask = False
 
-    if 'price' in tick_df.columns:
-        ticks_array[:, TICK_MID] = tick_df['price'].values
-    elif 'Price' in tick_df.columns:
-        ticks_array[:, TICK_MID] = tick_df['Price'].values
-    else:
+    # 检查 Bid 字段（多种可能的列名）
+    bid_columns = ['bid', 'Bid', 'BID', 'bid_price', 'BidPrice']
+    for col in bid_columns:
+        if col in tick_df.columns:
+            ticks_array[:, TICK_BID] = tick_df[col].values
+            has_real_bid = True
+            break
+
+    # 检查 Ask 字段（多种可能的列名）
+    ask_columns = ['ask', 'Ask', 'ASK', 'ask_price', 'AskPrice']
+    for col in ask_columns:
+        if col in tick_df.columns:
+            ticks_array[:, TICK_ASK] = tick_df[col].values
+            has_real_ask = True
+            break
+
+    # 如果有真实 Bid 但无 Ask，或反之，则根据价差推断
+    if has_real_bid and not has_real_ask:
+        # 有 Bid 无 Ask，Ask = Bid + spread
+        ticks_array[:, TICK_ASK] = ticks_array[:, TICK_BID] + spread_per_ounce
+        print(f"[Tick Engine] 检测到 Bid 但无 Ask，使用价差 ${spread_per_ounce} 生成 Ask")
+
+    elif has_real_ask and not has_real_bid:
+        # 有 Ask 无 Bid，Bid = Ask - spread
+        ticks_array[:, TICK_BID] = ticks_array[:, TICK_ASK] - spread_per_ounce
+        print(f"[Tick Engine] 检测到 Ask 但无 Bid，使用价差 ${spread_per_ounce} 生成 Bid")
+
+    elif not has_real_bid and not has_real_ask:
+        # ═══════════════════════════════════════════════════════════════════
+        # 【Critical Fix 7】无 Bid/Ask 数据时，使用 price 字段 + 参数化价差
+        # ═══════════════════════════════════════════════════════════════════
+        print(f"[Tick Engine] ⚠️ 无真实 Bid/Ask 数据，使用参数化价差 ${spread_per_ounce}")
+
+        # 查找 price 字段
+        price_columns = ['price', 'Price', 'PRICE', 'mid', 'Mid', 'MID', 'last', 'Last', 'LAST']
+        mid_price = None
+
+        for col in price_columns:
+            if col in tick_df.columns:
+                mid_price = tick_df[col].values
+                break
+
+        if mid_price is None:
+            # 最后的后备：使用第一列
+            mid_price = tick_df.iloc[:, 0].values
+            print(f"[Tick Engine] ⚠️ 使用 DataFrame 第一列作为价格")
+
+        # 使用参数传入的价差（而非硬编码 0.3）
+        half_spread = spread_per_ounce / 2.0
+        ticks_array[:, TICK_BID] = mid_price - half_spread
+        ticks_array[:, TICK_ASK] = mid_price + half_spread
+
+    # 计算 Mid 价格
+    mid_columns = ['price', 'Price', 'mid', 'Mid']
+    has_mid = False
+    for col in mid_columns:
+        if col in tick_df.columns:
+            ticks_array[:, TICK_MID] = tick_df[col].values
+            has_mid = True
+            break
+
+    if not has_mid:
         ticks_array[:, TICK_MID] = (ticks_array[:, TICK_BID] + ticks_array[:, TICK_ASK]) / 2
 
-    if 'volume' in tick_df.columns:
-        ticks_array[:, TICK_VOLUME] = tick_df['volume'].values
-    elif 'Volume' in tick_df.columns:
-        ticks_array[:, TICK_VOLUME] = tick_df['Volume'].values
+    # Volume 字段
+    volume_columns = ['volume', 'Volume', 'VOLUME', 'vol', 'Vol']
+    for col in volume_columns:
+        if col in tick_df.columns:
+            ticks_array[:, TICK_VOLUME] = tick_df[col].values
+            break
 
+    # 计算 Bar 索引
     bar_times = ohlcv_df.index.astype(np.int64).values / 1e9
     tick_times = ticks_array[:, TICK_TIMESTAMP]
     bar_indices = np.searchsorted(bar_times, tick_times, side='right') - 1
