@@ -130,6 +130,13 @@ ATR_SLIPPAGE_RATIO = 0.03       # ATR 滑点比例 (波动越大滑点越大)
 SLIPPAGE_MULT_A = 0.5           # 策略A滑点系数 (减半)
 SLIPPAGE_MULT_B = 3.0           # 策略B滑点系数 (3倍惩罚)
 
+# 【加固1】跳空惩罚性滑点
+GAP_SLIPPAGE_MULTIPLIER = 2.0   # 跳空时滑点翻倍
+
+# 【加固2】策略B滑点动态化
+# 突破行情流动性真空，ATR滑点比例加大
+ATR_SLIPPAGE_RATIO_B = 0.10     # 策略B使用ATR的10%作为滑点 (原0.03)
+
 # 【任务2.2 新增】佣金成本建模
 COMMISSION_PER_LOT = 3.5        # 单边佣金 (美元/手) - 双边共 $7/手
 COMMISSION_ROUND_TRIP = 7.0     # 双边佣金 (美元/手) = 开仓 + 平仓
@@ -460,6 +467,19 @@ def _create_numba_matcher():
             lowest_price = 1e10             # 持仓期间最低价
             current_strategy = 0            # 1=A, 2=B
 
+            # 【加固】K线跳空检测
+            prev_bar_idx_tracker = -1       # 上一个Tick所属K线索引
+
+            # ═══════════════════════════════════════════════════════════════════
+            # 【加固】滑点常量 (Numba 内部必须定义)
+            # ═══════════════════════════════════════════════════════════════════
+            BASE_SLIP = 0.15                # 基础滑点
+            ATR_SLIP_RATIO_A = 0.03         # 策略A ATR滑点比例
+            ATR_SLIP_RATIO_B = 0.10         # 【加固2】策略B ATR滑点比例 (加大)
+            SLIP_MULT_A = 0.5               # 策略A滑点系数
+            SLIP_MULT_B = 3.0               # 策略B滑点系数
+            GAP_SLIP_MULT = 2.0             # 【加固1】跳空惩罚性滑点倍数
+
             # ═══════════════════════════════════════════════════════════════════
             # 统计变量
             # ═══════════════════════════════════════════════════════════════════
@@ -501,6 +521,10 @@ def _create_numba_matcher():
                         if tick_bid < lowest_price:
                             lowest_price = tick_bid
 
+                    # 【加固】检测新K线开盘（用于跳空检测）
+                    is_new_bar = (bar_idx != prev_bar_idx_tracker)
+                    prev_bar_idx_tracker = bar_idx
+
                     # 计算持仓 K 线数
                     bars_held = bar_idx - entry_bar_idx
 
@@ -519,46 +543,42 @@ def _create_numba_matcher():
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】多头止损用 Bid，并加滑点惩罚
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
+                                # 【加固】使用函数内常量
+                                slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * SLIP_MULT_A
+                                # 【加固1】新K线开盘跳空，惩罚性滑点
+                                if is_new_bar:
+                                    slippage = slippage * GAP_SLIP_MULT
                                 exit_price = tick_bid - slippage
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】空头止损用 Ask，并加滑点惩罚
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
+                                slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * SLIP_MULT_A
+                                # 【加固1】新K线开盘跳空，惩罚性滑点
+                                if is_new_bar:
+                                    slippage = slippage * GAP_SLIP_MULT
                                 exit_price = tick_ask + slippage
 
                         # VWAP 止盈检查 (限价单属性，滑点减半)
                         if not should_exit:
                             if current_direction == 1:  # 多头
-                                # 【任务1 关键修复】多头止盈：平仓是卖出，必须用 Bid！
-                                # 原代码错误地使用了 tick_ask
                                 if tick_bid >= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    # 限价单：滑点减半
-                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
+                                    slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * 0.5
                                     exit_price = tick_bid - slippage
                             else:  # 空头
-                                # 【任务1 关键修复】空头止盈：平仓是买入，必须用 Ask！
-                                # 原代码错误地使用了 tick_bid
                                 if tick_ask <= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
+                                    slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * 0.5
                                     exit_price = tick_ask + slippage
 
                         # 时间止损 (市价单)
                         if not should_exit and bars_held >= max_hold_bars_a:
                             should_exit = True
                             exit_reason = EXIT_REASON_TIME_STOP
-                            slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                            slippage = BASE_SLIP + current_atr * ATR_SLIP_RATIO_A
                             # 【任务1 修复】多头用 Bid，空头用 Ask
                             if current_direction == 1:
                                 exit_price = tick_bid - slippage
@@ -570,24 +590,27 @@ def _create_numba_matcher():
                     # 【任务1 修复】Bid/Ask 倒挂修复 + 出场滑点
                     # ═══════════════════════════════════════════════════════════
                     elif current_strategy == 2:
+                        # 【加固2】策略B使用更大的ATR滑点比例
+                        strategy_b_slip = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_B) * SLIP_MULT_B
+
                         # 初始止损检查 (市价单，需要加滑点)
                         if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】多头止损用 Bid，加滑点
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
+                                slippage = strategy_b_slip
+                                # 【加固1】新K线开盘跳空，惩罚性滑点
+                                if is_new_bar:
+                                    slippage = slippage * GAP_SLIP_MULT
                                 exit_price = tick_bid - slippage
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】空头止损用 Ask，加滑点
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
+                                slippage = strategy_b_slip
+                                # 【加固1】新K线开盘跳空，惩罚性滑点
+                                if is_new_bar:
+                                    slippage = slippage * GAP_SLIP_MULT
                                 exit_price = tick_ask + slippage
 
                         # 追踪止损检查 (市价单，需要加滑点)
@@ -597,21 +620,13 @@ def _create_numba_matcher():
                                 if tick_bid <= trailing_stop and highest_price > entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    # 【任务1 修复】多头追踪止损用 Bid，加滑点
-                                    # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                    exit_price = tick_bid - slippage
+                                    exit_price = tick_bid - strategy_b_slip
                             else:  # 空头
                                 trailing_stop = lowest_price + trailing_mult_b * current_atr
                                 if tick_ask >= trailing_stop and lowest_price < entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    # 【任务1 修复】空头追踪止损用 Ask，加滑点
-                                    # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                    exit_price = tick_ask + slippage
+                                    exit_price = tick_ask + strategy_b_slip
 
                     # ═══════════════════════════════════════════════════════════
                     # 执行出场
@@ -671,11 +686,13 @@ def _create_numba_matcher():
                                 sig_sl = signals_array[signal_idx, SIG_STOP_LOSS]
                                 sig_entry_price = signals_array[signal_idx, SIG_ENTRY_PRICE]
 
-                                # 计算动态滑点
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                # 注意：入场时使用 sig_strategy，出场时使用 current_strategy
-                                slippage_mult = SLIPPAGE_MULT_A if sig_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
+                                # 【加固】计算动态滑点
+                                # 策略A: 较小滑点
+                                # 策略B: 较大滑点 (ATR * 0.10)
+                                if sig_strategy == 1:
+                                    slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * SLIP_MULT_A
+                                else:
+                                    slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_B) * SLIP_MULT_B
 
                                 # ─────────────────────────────────────────────────
                                 # 策略 A: 市价入场
@@ -732,6 +749,7 @@ def _create_numba_matcher():
                                             # 【Bug 3 修复】跳空缺口时，成交价 = 触发 Tick 的 Ask
                                             # 绝不能使用 target_price，那是"时间旅行"作弊
                                             # 【Bug 1 修复】不再加 spread/2
+                                            # 【加固2】策略B使用更大的滑点
                                             entry_px = tick_ask + slippage
                                             is_in_position = True
                                             current_direction = 1
@@ -890,40 +908,29 @@ def _create_numba_matcher():
                         # ════════════════════════════════════════════════════════════════
                         # 【任务1 修复】策略A出场逻辑 - Bid/Ask 倒挂修复 + 出场滑点
                         # ════════════════════════════════════════════════════════════════
+                        strategy_a_slip = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * SLIPPAGE_MULT_A
+
                         # 止损检查 (市价单，需要加滑点)
                         if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】多头止损用 Bid，并加滑点惩罚
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                exit_price = tick_bid - slippage
+                                exit_price = tick_bid - strategy_a_slip
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】空头止损用 Ask，并加滑点惩罚
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                exit_price = tick_ask + slippage
+                                exit_price = tick_ask + strategy_a_slip
 
                         # VWAP 止盈检查 (限价单属性，滑点减半)
                         if not should_exit:
                             if current_direction == 1:  # 多头
-                                # 【任务1 关键修复】多头止盈：平仓是卖出，必须用 Bid！
-                                # 原代码错误地使用了 tick_ask
                                 if tick_bid >= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    # 限价单：滑点减半
                                     slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
                                     exit_price = tick_bid - slippage
                             else:  # 空头
-                                # 【任务1 关键修复】空头止盈：平仓是买入，必须用 Ask！
-                                # 原代码错误地使用了 tick_bid
                                 if tick_ask <= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
@@ -935,7 +942,6 @@ def _create_numba_matcher():
                             should_exit = True
                             exit_reason = EXIT_REASON_TIME_STOP
                             slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
-                            # 【任务1 修复】多头用 Bid，空头用 Ask
                             if current_direction == 1:
                                 exit_price = tick_bid - slippage
                             else:
@@ -944,26 +950,21 @@ def _create_numba_matcher():
                     elif current_strategy == 2:
                         # ════════════════════════════════════════════════════════════════
                         # 【任务1 修复】策略B出场逻辑 - Bid/Ask 倒挂修复 + 出场滑点
+                        # 【加固2】策略B使用更大的ATR滑点比例
                         # ════════════════════════════════════════════════════════════════
+                        strategy_b_slip = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO_B) * SLIPPAGE_MULT_B
+
                         # 初始止损检查 (市价单，需要加滑点)
                         if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】多头止损用 Bid，加滑点
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                exit_price = tick_bid - slippage
+                                exit_price = tick_bid - strategy_b_slip
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                # 【任务1 修复】空头止损用 Ask，加滑点
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                exit_price = tick_ask + slippage
+                                exit_price = tick_ask + strategy_b_slip
 
                         # 追踪止损检查 (市价单，需要加滑点)
                         if not should_exit:
@@ -972,21 +973,13 @@ def _create_numba_matcher():
                                 if tick_bid <= trailing_stop and highest_price > entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    # 【任务1 修复】多头追踪止损用 Bid，加滑点
-                                    # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                    exit_price = tick_bid - slippage
+                                    exit_price = tick_bid - strategy_b_slip
                             else:  # 空头
                                 trailing_stop = lowest_price + trailing_mult_b * current_atr
                                 if tick_ask >= trailing_stop and lowest_price < entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    # 【任务1 修复】空头追踪止损用 Ask，加滑点
-                                    # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                slippage_mult = SLIPPAGE_MULT_A if current_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
-                                    exit_price = tick_ask + slippage
+                                    exit_price = tick_ask + strategy_b_slip
 
                     if should_exit:
                         # 【Bug 1 修复】直接使用出场价，不再加减 spread/2
@@ -1028,10 +1021,12 @@ def _create_numba_matcher():
                                 sig_strategy = int(signals_array[signal_idx, SIG_STRATEGY])
                                 sig_sl = signals_array[signal_idx, SIG_STOP_LOSS]
                                 sig_entry_price = signals_array[signal_idx, SIG_ENTRY_PRICE]
-                                # 【修复2.2】滑点不对称性：策略A减半，策略B 3倍
-                                # 注意：入场时使用 sig_strategy，出场时使用 current_strategy
-                                slippage_mult = SLIPPAGE_MULT_A if sig_strategy == 1 else SLIPPAGE_MULT_B
-                                slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * slippage_mult
+
+                                # 【加固】计算滑点：策略A较小，策略B较大
+                                if sig_strategy == 1:
+                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * SLIPPAGE_MULT_A
+                                else:
+                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO_B) * SLIPPAGE_MULT_B
 
                                 if sig_strategy == 1:
                                     if sig_direction == 1:
@@ -1039,14 +1034,12 @@ def _create_numba_matcher():
                                             signals_array[signal_idx, SIG_EXECUTED] = 1.0
                                             signal_idx += 1
                                             continue
-                                        # 【Bug 1 修复】不再加 spread/2
                                         entry_px = tick_ask + slippage
                                     else:
                                         if sig_sl > 0.0 and tick_bid >= sig_sl:
                                             signals_array[signal_idx, SIG_EXECUTED] = 1.0
                                             signal_idx += 1
                                             continue
-                                        # 【Bug 1 修复】不再减 spread/2
                                         entry_px = tick_bid - slippage
 
                                     is_in_position = True
@@ -1063,15 +1056,12 @@ def _create_numba_matcher():
                                 elif sig_strategy == 2:
                                     target_price = sig_entry_price
 
-                                    # 【Bug 2 修复】使用 > 0.0 判断有效目标价
                                     if target_price <= 0.0:
                                         signals_array[signal_idx, SIG_EXECUTED] = 1.0
                                         signal_idx += 1
                                         continue
 
                                     if sig_direction == 1 and tick_ask >= target_price:
-                                        # 【Bug 3 修复】使用 tick_ask 而非 target_price
-                                        # 【Bug 1 修复】不再加 spread/2
                                         entry_px = tick_ask + slippage
                                         is_in_position = True
                                         current_direction = 1
@@ -1084,8 +1074,6 @@ def _create_numba_matcher():
                                         lowest_price = 1e10
                                         signals_array[signal_idx, SIG_EXECUTED] = 1.0
                                     elif sig_direction == -1 and tick_bid <= target_price:
-                                        # 【Bug 3 修复】使用 tick_bid 而非 target_price
-                                        # 【Bug 1 修复】不再减 spread/2
                                         entry_px = tick_bid - slippage
                                         is_in_position = True
                                         current_direction = -1

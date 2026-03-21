@@ -135,6 +135,10 @@ class BacktestEngine:
         # ========== 滑点常量 ==========
         BASE_SLIPPAGE = 0.15  # 基础滑点 $0.15 (15 pips)
         ATR_SLIPPAGE_RATIO = 0.03  # ATR的3%作为波动滑点
+        # 【加固2】策略B滑点动态化：突破行情流动性真空，滑点加大
+        # 策略A: 均值回归，左侧交易，滑点较小
+        # 策略B: 动量突破，右侧交易，流动性真空，滑点较大
+        STRATEGY_B_ATR_SLIPPAGE_RATIO = 0.1  # 策略B使用ATR的10%作为滑点
         slippage = BASE_SLIPPAGE + atr * ATR_SLIPPAGE_RATIO
 
         # ========== 策略B价格行为确认：K线内执行 ==========
@@ -149,8 +153,14 @@ class BacktestEngine:
                 if low > target_price:
                     return False
 
-            # 验证通过，使用触发价格
-            entry_price = target_price
+            # 【加固2】策略B滑点动态化：突破行情流动性真空
+            strategy_b_slippage = BASE_SLIPPAGE + atr * STRATEGY_B_ATR_SLIPPAGE_RATIO
+
+            # 验证通过，使用触发价格 + 更大的滑点
+            if direction == 1:
+                entry_price = target_price + strategy_b_slippage
+            else:
+                entry_price = target_price - strategy_b_slippage
         else:
             # ========== 策略A均值回归：开盘价执行 ==========
             entry_price = open_price

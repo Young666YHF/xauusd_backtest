@@ -250,23 +250,30 @@ def calculate_custom_fitness(
     spread_per_ounce: float = 0.6
 ) -> float:
     """
-    计算自定义适应度函数（修复版）
+    计算自定义适应度函数（加固版）
 
     修复点:
     1. 使用真实equity_curve计算Calmar，而非简化模拟
     2. 平滑惩罚函数，避免断崖式惩罚撕裂贝叶斯模型
 
-    【任务4 新增】
-    3. 增加对微利交易的惩罚（Average Win < 点差的3倍）
-       - 防止算法拟合出高频剥头皮策略
-       - 实盘中会被手续费吞噬
+    【加固3.1】利润质量评分
+    - 引入"利润分布一致性"指标：总盈亏除以盈利的标准差
+    - 惩罚依靠1-2笔大单获利的参数
+
+    【加固3.2】夏普率回撤比惩罚
+    - 增加对"单次最大回撤持续时间"的惩罚
+    - 回撤超过15天给予0.5权重惩罚
+
+    【加固3.3】微利策略过滤（严格执行）
+    - 平均每笔盈利 < 2 * 平均点差成本，Fitness直接设为负值
+    - 不需要看起来胜率高的剥头皮策略
 
     设计理念:
     1. Calmar比率作为核心指标（收益/风险）
     2. 交易次数不足时使用平滑衰减因子
     3. 胜率作为次要调整因子
     4. 夏普比率作为补充
-    5. 【任务4】微利交易惩罚
+    5. 利润质量评分（防止运气交易）
 
     Args:
         stats: 回测统计字典
@@ -285,14 +292,28 @@ def calculate_custom_fitness(
     win_rate = stats.get('win_rate', 0)
     sharpe_ratio = stats.get('sharpe_ratio', 0)
     profit_factor = stats.get('profit_factor', 1)
+    total_pnl = stats.get('total_pnl', 0)
 
-    # 【任务4 新增】获取平均盈利
+    # 获取平均盈利
     avg_win = stats.get('avg_win', 0)
     avg_loss = stats.get('avg_loss', 0)
 
-    # 【任务4】计算佣金后净利润（每手双边 $7）
+    # 计算佣金后净利润（每手双边 $7）
     commission_per_lot = 7.0  # 双边佣金
-    net_profit_after_commission = stats.get('total_pnl', 0) - (total_trades * commission_per_lot / 2)  # 粗略估算
+    net_profit_after_commission = total_pnl - (total_trades * commission_per_lot / 2)
+
+    # 平均点差成本（每笔交易）
+    avg_spread_cost = spread_per_ounce * 100  # $0.6 * 100盎司 = $60/手
+
+    # ========== 【加固3.3】微利策略过滤（严格执行）==========
+    # 如果平均每笔盈利 < 2 * 平均点差成本，该 Trial 的 Fitness 直接设为负值
+    min_profitable_win = avg_spread_cost * 2  # $120/手
+
+    if avg_win > 0 and avg_win < min_profitable_win:
+        if verbose:
+            print(f"  [微利策略拒绝] 平均盈利 ${avg_win:.2f} < 2倍点差成本 ${min_profitable_win:.2f}")
+        # 直接返回负值，拒绝该参数组合
+        return -1000.0 - (min_profitable_win - avg_win)
 
     # ========== 平滑惩罚函数 ==========
     # 修复: 使用连续平滑衰减，而非断崖式惩罚
@@ -332,6 +353,65 @@ def calculate_custom_fitness(
     if calmar > 0:
         fitness += calmar * 10  # Calmar奖励
 
+    # ========== 【加固3.1】利润质量评分 ==========
+    # 引入"利润分布一致性"指标：总盈亏 / 盈利标准差
+    # 惩罚依靠1-2笔大单获利的参数
+    trades_df = stats.get('trades_df', None)
+    profit_consistency_score = 0.0
+
+    if trades_df is not None and len(trades_df) > 1:
+        profits = trades_df['pnl'].values
+        wins = profits[profits > 0]
+
+        if len(wins) > 1:
+            win_std = np.std(wins)
+            if win_std > 0:
+                # 利润分布一致性 = 总盈利 / 盈利标准差
+                # 值越大表示盈利越均匀，越小表示依靠少数大单
+                profit_consistency = np.sum(wins) / win_std
+                # 归一化并加入适应度
+                profit_consistency_score = min(profit_consistency / 10.0, 20.0)  # 最高20分
+                fitness += profit_consistency_score
+
+                if verbose and profit_consistency < 5:
+                    print(f"  [利润质量警告] 一致性得分 {profit_consistency:.2f} 偏低，可能依靠少数大单")
+        elif len(wins) == 1:
+            # 只有一笔盈利，严重惩罚
+            fitness -= 30
+            if verbose:
+                print(f"  [利润质量惩罚] 仅1笔盈利，严重依赖运气")
+
+    # ========== 【加固3.2】夏普率回撤比惩罚 ==========
+    # 增加对"单次最大回撤持续时间"的惩罚
+    # 如果资金曲线横盘或回撤超过15天，给予惩罚
+    if daily_returns is not None and len(daily_returns) >= 15:
+        # 计算回撤持续期
+        cumulative = (1 + daily_returns).cumprod()
+        rolling_max = cumulative.expanding().max()
+        in_drawdown = cumulative < rolling_max
+
+        # 计算最大回撤持续天数
+        drawdown_durations = []
+        current_duration = 0
+        for is_dd in in_drawdown:
+            if is_dd:
+                current_duration += 1
+            else:
+                if current_duration > 0:
+                    drawdown_durations.append(current_duration)
+                current_duration = 0
+        if current_duration > 0:
+            drawdown_durations.append(current_duration)
+
+        max_dd_duration = max(drawdown_durations) if drawdown_durations else 0
+
+        # 如果回撤持续超过15天，惩罚
+        if max_dd_duration > 15:
+            dd_duration_penalty = (max_dd_duration - 15) * 0.5  # 每超1天惩罚0.5分
+            fitness -= dd_duration_penalty
+            if verbose:
+                print(f"  [回撤持续惩罚] 最大回撤持续 {max_dd_duration} 天，惩罚: -{dd_duration_penalty:.2f}")
+
     # ========== 调整因子 ==========
 
     # 1. 胜率调整（平滑）
@@ -346,21 +426,6 @@ def calculate_custom_fitness(
     if profit_factor > 1.5:
         fitness += (profit_factor - 1.5) * 10
 
-    # ========== 【任务4 新增】微利交易惩罚 ==========
-    # 如果平均盈利小于点差的 3 倍，说明策略是高频剥头皮
-    # 实盘中会被手续费吞噬，应该惩罚
-    min_profitable_win = spread_per_ounce * 3 * 100  # 点差 * 3 * 合约乘数 (100盎司/手)
-    scalping_penalty = 0.0
-
-    if avg_win > 0 and avg_win < min_profitable_win:
-        # 微利交易惩罚：平均盈利越小，惩罚越大
-        scalping_ratio = avg_win / min_profitable_win  # 0~1 之间
-        scalping_penalty = (1.0 - scalping_ratio) * 50  # 最高惩罚 50 分
-        fitness -= scalping_penalty
-
-        if verbose:
-            print(f"  [微利交易惩罚] 平均盈利 ${avg_win:.2f} < 阈值 ${min_profitable_win:.2f}, 惩罚: -{scalping_penalty:.2f}")
-
     # 极端情况处理
     if total_trades < 5:
         # 交易次数过少，返回负值但保持平滑
@@ -371,7 +436,7 @@ def calculate_custom_fitness(
               f"Trades: {total_trades}, Win: {win_rate:.1f}%, "
               f"TradeFactor: {trade_factor:.2f}, Calmar: {calmar:.2f}, "
               f"Fitness: {fitness:.2f}")
-        # 【任务4 新增】打印扣除佣金后的净利润
+        print(f"  [利润质量] 一致性得分: {profit_consistency_score:.2f}")
         print(f"  [佣金后净利润] 扣除每手 ${commission_per_lot:.1f} 佣金后: ${net_profit_after_commission:.2f}")
 
     return fitness

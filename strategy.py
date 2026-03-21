@@ -78,6 +78,10 @@ class StrategyState:
     pending_confirmation: bool = False  # 是否在等待回踩确认
     pending_signal: Optional[PendingSignal] = None  # 待确认的信号详情
 
+    # 【加固3】信号时效性统计 - 记录失效机会
+    expired_signals_count: int = 0  # 因超时失效的信号数量
+    total_pending_signals: int = 0  # 总共产生的待确认信号数量
+
 
 # =============================================================================
 # 主策略类
@@ -436,6 +440,8 @@ class TradingStrategy:
                 confirmed, failed, reason = self.check_pullback_confirmation(df, idx, pending)
 
                 if failed:
+                    # 【加固3】记录失效机会
+                    self.state.expired_signals_count += 1
                     # 确认失败，清除待确认状态
                     self.state.pending_signal = None
                     self.state.pending_confirmation = False
@@ -522,6 +528,9 @@ class TradingStrategy:
         self.state.pending_confirmation = True
         self.state.last_breakout_bar = idx
         self.state.breakout_direction = direction
+
+        # 【加固3】统计待确认信号数量
+        self.state.total_pending_signals += 1
 
         return None  # 暂不生成信号，等待确认
 
@@ -677,6 +686,10 @@ class TradingStrategy:
         ATR_SLIPPAGE_RATIO = 0.03
         slippage = BASE_SLIPPAGE + atr * ATR_SLIPPAGE_RATIO
 
+        # ========== 【加固1】跳空惩罚性滑点 ==========
+        # 当开盘价跳空越过止损时，流动性枯竭，滑点应加倍惩罚
+        GAP_SLIPPAGE_MULTIPLIER = 2.0  # 跳空时滑点翻倍
+
         # ====================================================================
         # 策略A出场逻辑（重构版）
         # ====================================================================
@@ -686,9 +699,11 @@ class TradingStrategy:
                 if low <= stop_loss:
                     # 检查是否跳空击穿（开盘价已在止损以下）
                     if open_price <= stop_loss:
-                        # 跳空击穿：使用开盘价出场（加滑点惩罚）
-                        exit_price = open_price - slippage
-                        return True, f"止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f}", exit_price
+                        # 【加固1】跳空击穿：使用开盘价 + 惩罚性滑点强制平仓
+                        # 严禁等待价格回调，流动性枯竭时必须认赔
+                        gap_slippage = slippage * GAP_SLIPPAGE_MULTIPLIER
+                        exit_price = open_price - gap_slippage
+                        return True, f"止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f} (惩罚滑点{gap_slippage:.2f})", exit_price
                     else:
                         # 正常触及：使用止损价
                         exit_price = stop_loss
@@ -696,8 +711,10 @@ class TradingStrategy:
             else:  # 空头
                 if high >= stop_loss:
                     if open_price >= stop_loss:
-                        exit_price = open_price + slippage
-                        return True, f"止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f}", exit_price
+                        # 【加固1】跳空击穿：使用开盘价 + 惩罚性滑点强制平仓
+                        gap_slippage = slippage * GAP_SLIPPAGE_MULTIPLIER
+                        exit_price = open_price + gap_slippage
+                        return True, f"止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f} (惩罚滑点{gap_slippage:.2f})", exit_price
                     else:
                         exit_price = stop_loss
                         return True, f"止损: 最高价{high:.2f}触及止损{stop_loss:.2f}", exit_price
@@ -750,6 +767,10 @@ class TradingStrategy:
         elif strategy == 'B':
             trailing_mult = self.params.get('trailing_stop_atr_mult', 3.5)
 
+            # 【加固2】策略B滑点动态化：突破行情流动性真空，滑点加大
+            # 基础滑点 + ATR * 0.1 (比策略A更大的滑点压力测试)
+            strategy_b_slippage = BASE_SLIPPAGE + atr * 0.1
+
             # 更新最高/最低价
             if direction == 1:  # 多头
                 if 'highest_price' not in position:
@@ -759,8 +780,10 @@ class TradingStrategy:
                 # 初始止损检查
                 if low <= stop_loss:
                     if open_price <= stop_loss:
-                        exit_price = open_price - slippage
-                        return True, f"初始止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f}", exit_price
+                        # 【加固1】跳空击穿：惩罚性滑点
+                        gap_slippage = strategy_b_slippage * GAP_SLIPPAGE_MULTIPLIER
+                        exit_price = open_price - gap_slippage
+                        return True, f"初始止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f} (惩罚滑点{gap_slippage:.2f})", exit_price
                     else:
                         exit_price = stop_loss
                         return True, f"初始止损: 最低价{low:.2f}触及止损{stop_loss:.2f}", exit_price
@@ -769,8 +792,10 @@ class TradingStrategy:
                 trailing_stop = position['highest_price'] - trailing_mult * atr
                 if low <= trailing_stop and position['highest_price'] > entry_price:
                     if open_price <= trailing_stop:
-                        exit_price = open_price - slippage
-                        return True, f"追踪止损跳空: 开盘{open_price:.2f}击穿{trailing_stop:.2f}", exit_price
+                        # 【加固1】跳空击穿：惩罚性滑点
+                        gap_slippage = strategy_b_slippage * GAP_SLIPPAGE_MULTIPLIER
+                        exit_price = open_price - gap_slippage
+                        return True, f"追踪止损跳空: 开盘{open_price:.2f}击穿{trailing_stop:.2f} (惩罚滑点{gap_slippage:.2f})", exit_price
                     else:
                         exit_price = trailing_stop
                         return True, f"追踪止损: 最低价{low:.2f}触及追踪止损{trailing_stop:.2f}", exit_price
@@ -783,8 +808,10 @@ class TradingStrategy:
                 # 初始止损检查
                 if high >= stop_loss:
                     if open_price >= stop_loss:
-                        exit_price = open_price + slippage
-                        return True, f"初始止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f}", exit_price
+                        # 【加固1】跳空击穿：惩罚性滑点
+                        gap_slippage = strategy_b_slippage * GAP_SLIPPAGE_MULTIPLIER
+                        exit_price = open_price + gap_slippage
+                        return True, f"初始止损跳空: 开盘{open_price:.2f}击穿止损{stop_loss:.2f} (惩罚滑点{gap_slippage:.2f})", exit_price
                     else:
                         exit_price = stop_loss
                         return True, f"初始止损: 最高价{high:.2f}触及止损{stop_loss:.2f}", exit_price
@@ -793,8 +820,10 @@ class TradingStrategy:
                 trailing_stop = position['lowest_price'] + trailing_mult * atr
                 if high >= trailing_stop and position['lowest_price'] < entry_price:
                     if open_price >= trailing_stop:
-                        exit_price = open_price + slippage
-                        return True, f"追踪止损跳空: 开盘{open_price:.2f}击穿{trailing_stop:.2f}", exit_price
+                        # 【加固1】跳空击穿：惩罚性滑点
+                        gap_slippage = strategy_b_slippage * GAP_SLIPPAGE_MULTIPLIER
+                        exit_price = open_price + gap_slippage
+                        return True, f"追踪止损跳空: 开盘{open_price:.2f}击穿{trailing_stop:.2f} (惩罚滑点{gap_slippage:.2f})", exit_price
                     else:
                         exit_price = trailing_stop
                         return True, f"追踪止损: 最高价{high:.2f}触及追踪止损{trailing_stop:.2f}", exit_price

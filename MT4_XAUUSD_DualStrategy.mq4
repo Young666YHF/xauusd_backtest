@@ -68,6 +68,15 @@ input int    InpEuropeanEndBJ = 0;       // 欧美盘结束小时 (北京时间 
 // 【修复1.4 新增】最大点差过滤 (防止结算期点差飙升)
 input double InpMaxSpread = 50.0;        // 最大允许点差 (点值, XAUUSD典型点差约30-50)
 
+// 【加固2.1 新增】休市保护参数
+input bool   InpEnableFridayClose = true; // 启用周五闭盘前强制平仓
+input int    InpFridayCloseHour = 22;     // 周五平仓小时 (服务器时间, 默认22:00)
+input int    InpFridayCloseMinute = 0;    // 周五平仓分钟
+
+// 【加固2.2 新增】点差平滑参数
+input int    InpSpreadSmoothPeriod = 5;   // 点差平滑周期 (分钟)
+input double InpSpreadMultThreshold = 2.0; // 点差扩大阈值倍数
+
 // 交易设置
 input double InpLotSize = 1.0;           // 交易手数
 input int    InpSlippage = 30;           // 滑点 (点)
@@ -100,6 +109,12 @@ double g_pendingATR = 0;
 double g_pendingPrevLow = 0;
 double g_pendingPrevHigh = 0;
 int g_confirmationBarsLeft = 0;
+
+// 【加固2.2 新增】点差平滑跟踪
+double g_spreadHistory[100];              // 存储历史点差 (最多100个采样)
+int g_spreadHistoryIndex = 0;             // 当前索引
+int g_spreadHistoryCount = 0;             // 有效采样数量
+datetime g_lastSpreadSampleTime = 0;      // 上次采样时间
 
 //+------------------------------------------------------------------+
 //| EA初始化                                                          |
@@ -138,6 +153,14 @@ void OnTick()
       // 点差过大，拒绝交易
       return;
    }
+
+   // ═══════════════════════════════════════════════════════════════════
+   // 【加固2.1】周五闭盘前强制平仓检查
+   // ═══════════════════════════════════════════════════════════════════
+   CheckFridayForceClose();
+
+   // 【加固2.2】采样当前点差
+   SampleSpread();
 
    // 检查新K线形成
    static datetime lastBarTime = 0;
@@ -773,6 +796,100 @@ void UpdatePositionStats(double high, double low)
 }
 
 //+------------------------------------------------------------------+
+//| 【加固2.2 新增】采样当前点差 (每分钟采样一次)                     |
+//+------------------------------------------------------------------+
+void SampleSpread()
+{
+   datetime currentTime = TimeCurrent();
+   int elapsedSeconds = (int)(currentTime - g_lastSpreadSampleTime);
+
+   // 每分钟采样一次
+   if(elapsedSeconds >= 60)
+   {
+      double currentSpread = MarketInfo(Symbol(), MODE_SPREAD);
+      g_spreadHistory[g_spreadHistoryIndex] = currentSpread;
+      g_spreadHistoryIndex = (g_spreadHistoryIndex + 1) % 100;
+      if(g_spreadHistoryCount < 100) g_spreadHistoryCount++;
+      g_lastSpreadSampleTime = currentTime;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 【加固2.2 新增】计算平均点差                                      |
+//+------------------------------------------------------------------+
+double GetAverageSpread(int periodMinutes)
+{
+   if(g_spreadHistoryCount == 0) return MarketInfo(Symbol(), MODE_SPREAD);
+
+   double sum = 0;
+   int count = MathMin(periodMinutes, g_spreadHistoryCount);
+   int startIndex = g_spreadHistoryIndex - count;
+   if(startIndex < 0) startIndex += 100;
+
+   for(int i = 0; i < count; i++)
+   {
+      int idx = (startIndex + i) % 100;
+      sum += g_spreadHistory[idx];
+   }
+
+   return (count > 0) ? sum / count : MarketInfo(Symbol(), MODE_SPREAD);
+}
+
+//+------------------------------------------------------------------+
+//| 【加固2.2 新增】检查点差是否允许出场                              |
+//| 防止被"恶意扩大点差"扫损                                         |
+//+------------------------------------------------------------------+
+bool IsSpreadSafeForExit()
+{
+   double currentSpread = MarketInfo(Symbol(), MODE_SPREAD);
+   double avgSpread = GetAverageSpread(InpSpreadSmoothPeriod);
+
+   // 如果当前点差超过平均点差的阈值倍数，拒绝出场
+   if(avgSpread > 0 && currentSpread > avgSpread * InpSpreadMultThreshold)
+   {
+      Print("【点差防护】拒绝出场: 当前点差=", currentSpread, " > 平均点差*", InpSpreadMultThreshold, "=", avgSpread * InpSpreadMultThreshold);
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| 【加固2.1 新增】周五闭盘前强制平仓检查                            |
+//+------------------------------------------------------------------+
+void CheckFridayForceClose()
+{
+   if(!InpEnableFridayClose) return;
+
+   datetime currentTime = TimeCurrent();
+   int dayOfWeek = TimeDayOfWeek(currentTime);
+   int hour = TimeHour(currentTime);
+   int minute = TimeMinute(currentTime);
+
+   // 周五 (dayOfWeek=5)
+   if(dayOfWeek == 5)
+   {
+      // 检查是否到达指定平仓时间
+      if(hour == InpFridayCloseHour && minute >= InpFridayCloseMinute)
+      {
+         // 检查是否有持仓
+         int totalOrders = OrdersTotal();
+         for(int i = totalOrders - 1; i >= 0; i--)
+         {
+            if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+            {
+               if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber)
+               {
+                  Print("【周五强制平仓】服务器时间: ", hour, ":", minute, " 平仓订单 #", OrderTicket());
+                  ClosePositionMQL4("周五闭盘前强制平仓");
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
 //| 出场条件检查 (每Tick执行)                                         |
 //+------------------------------------------------------------------+
 void CheckExitConditions(int positionType, double positionSL, double positionOpenPrice,
@@ -781,22 +898,30 @@ void CheckExitConditions(int positionType, double positionSL, double positionOpe
    bool shouldClose = false;
    string reason = "";
 
+   // 【加固2.2】采样当前点差
+   SampleSpread();
+
    // 策略A出场
    if(g_currentStrategy == "A")
    {
       if(positionType == OP_BUY)
       {
-         // 止损检查
+         // 止损检查 - 止损必须立即执行，不受点差限制
          if(Bid <= positionSL)
          {
             shouldClose = true;
             reason = "止损";
          }
-         // VWAP止盈
+         // VWAP止盈 - 【加固2.2】点差平滑保护
          else if(Ask >= vwap)
          {
-            shouldClose = true;
-            reason = "VWAP止盈";
+            // 检查中间价是否触及目标，且点差正常
+            double midPrice = (Bid + Ask) / 2;
+            if(midPrice >= vwap && IsSpreadSafeForExit())
+            {
+               shouldClose = true;
+               reason = "VWAP止盈";
+            }
          }
       }
       else if(positionType == OP_SELL)
@@ -808,8 +933,13 @@ void CheckExitConditions(int positionType, double positionSL, double positionOpe
          }
          else if(Bid <= vwap)
          {
-            shouldClose = true;
-            reason = "VWAP止盈";
+            // 【加固2.2】点差平滑保护
+            double midPrice = (Bid + Ask) / 2;
+            if(midPrice <= vwap && IsSpreadSafeForExit())
+            {
+               shouldClose = true;
+               reason = "VWAP止盈";
+            }
          }
       }
 
@@ -1010,6 +1140,7 @@ void SavePositionState()
 
 //+------------------------------------------------------------------+
 //| 从文件加载持仓状态                                                |
+//| 【加固2.3】验证订单是否仍然存在，防止操作已不存在的订单           |
 //+------------------------------------------------------------------+
 void LoadPositionState()
 {
@@ -1029,6 +1160,30 @@ void LoadPositionState()
          g_lowestSinceEntry = FileReadDouble(handle);
 
          Print("加载持仓状态: 策略", g_currentStrategy);
+
+         // 【加固2.3】关键验证：检查订单是否仍然存在
+         // 如果订单被手动关闭或被强平，必须重置状态
+         bool orderExists = false;
+         int totalOrders = OrdersTotal();
+
+         for(int i = 0; i < totalOrders; i++)
+         {
+            if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+            {
+               if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber)
+               {
+                  orderExists = true;
+                  break;
+               }
+            }
+         }
+
+         // 如果状态文件显示有持仓，但实际没有订单，重置状态
+         if(g_currentStrategy != "" && !orderExists)
+         {
+            Print("【内存修复】检测到订单已不存在，重置状态文件");
+            ResetPositionState();
+         }
       }
       FileClose(handle);
    }
