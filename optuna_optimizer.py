@@ -18,6 +18,7 @@ Optuna贝叶斯优化模块
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Callable, Optional
+from dataclasses import dataclass
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -1416,3 +1417,160 @@ def run_tick_optuna_optimization(
             'execution_time': best_trial.user_attrs.get('execution_time'),
         }
     }
+
+
+# =============================================================================
+# 【Critical Fix 4】蒙特卡洛噪音注入防过拟合
+# =============================================================================
+
+@dataclass
+class MonteCarloResult:
+    """蒙特卡洛噪音注入测试结果"""
+    original_sharpe: float
+    original_calmar: float
+    noise_sharpe_mean: float
+    noise_sharpe_std: float
+    noise_calmar_mean: float
+    noise_calmar_std: float
+    sharpe_degradation: float  # 夏普劣化百分比
+    calmar_degradation: float  # Calmar劣化百分比
+    is_fragile: bool           # 是否脆弱
+    rejection_reason: str
+
+
+def inject_slippage_noise(
+    trades_df: pd.DataFrame,
+    noise_ratio: float = 0.2,
+    seed: Optional[int] = None
+) -> pd.DataFrame:
+    """
+    对交易序列注入滑点噪音
+    
+    Args:
+        trades_df: 交易记录 DataFrame
+        noise_ratio: 噪音比例 (默认 0.2 = ±20%)
+        seed: 随机种子
+    
+    Returns:
+        注入噪音后的交易记录 DataFrame
+    """
+    if seed is not None:
+        np.random.seed(seed)
+    
+    noisy_trades = trades_df.copy()
+    base_slippage = 0.15
+    
+    for idx in noisy_trades.index:
+        direction = 1 if noisy_trades.loc[idx, 'direction'] == 'LONG' else -1
+        entry_price = noisy_trades.loc[idx, 'entry_price']
+        exit_price = noisy_trades.loc[idx, 'exit_price']
+        
+        entry_noise = np.random.uniform(-noise_ratio, noise_ratio)
+        exit_noise = np.random.uniform(-noise_ratio, noise_ratio)
+        
+        if direction == 1:
+            noisy_entry = entry_price * (1 + entry_noise * base_slippage / entry_price)
+            noisy_exit = exit_price * (1 - exit_noise * base_slippage / exit_price)
+        else:
+            noisy_entry = entry_price * (1 - entry_noise * base_slippage / entry_price)
+            noisy_exit = exit_price * (1 + exit_noise * base_slippage / exit_price)
+        
+        noisy_trades.loc[idx, 'entry_price'] = noisy_entry
+        noisy_trades.loc[idx, 'exit_price'] = noisy_exit
+        
+        price_diff = (noisy_exit - noisy_entry) * direction
+        noisy_trades.loc[idx, 'pnl'] = price_diff * 100
+    
+    return noisy_trades
+
+
+def run_monte_carlo_validation(
+    trades_df: pd.DataFrame,
+    n_simulations: int = 100,
+    noise_ratio: float = 0.2,
+    degradation_threshold: float = 0.5,
+    initial_capital: float = 100000,
+    verbose: bool = True
+) -> MonteCarloResult:
+    """
+    运行蒙特卡洛噪音注入验证
+    
+    如果劣化超过阈值，判定参数脆弱，拒绝该参数组合
+    """
+    if len(trades_df) < 5:
+        return MonteCarloResult(
+            original_sharpe=0, original_calmar=0,
+            noise_sharpe_mean=0, noise_sharpe_std=0,
+            noise_calmar_mean=0, noise_calmar_std=0,
+            sharpe_degradation=1.0, calmar_degradation=1.0,
+            is_fragile=True, rejection_reason="交易次数过少 (<5)"
+        )
+    
+    pnls = trades_df['pnl'].values
+    returns = pnls / initial_capital
+    
+    # 原始指标
+    mean_return = np.mean(returns)
+    std_return = np.std(returns)
+    original_sharpe = (mean_return / std_return * np.sqrt(252 * 10)) if std_return > 0 else 0
+    
+    equity = np.cumsum(pnls) + initial_capital
+    rolling_max = np.maximum.accumulate(equity)
+    drawdown = (equity - rolling_max) / rolling_max * 100
+    max_drawdown = abs(np.min(drawdown))
+    total_return = (equity[-1] - initial_capital) / initial_capital * 100
+    annual_return = total_return * (252 / 63)
+    original_calmar = annual_return / max_drawdown if max_drawdown > 0 else float('inf')
+    
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"【蒙特卡洛噪音注入验证】模拟次数: {n_simulations}")
+        print(f"原始夏普: {original_sharpe:.4f}, 原始 Calmar: {original_calmar:.4f}")
+    
+    # 噪音模拟
+    noise_sharpes = []
+    noise_calmars = []
+    
+    for i in range(n_simulations):
+        noisy_trades = inject_slippage_noise(trades_df, noise_ratio, seed=i)
+        noisy_pnls = noisy_trades['pnl'].values
+        noisy_returns = noisy_pnls / initial_capital
+        
+        mean_ret = np.mean(noisy_returns)
+        std_ret = np.std(noisy_returns)
+        noise_sharpe = (mean_ret / std_ret * np.sqrt(252 * 10)) if std_ret > 0 else 0
+        
+        noisy_equity = np.cumsum(noisy_pnls) + initial_capital
+        noisy_rolling_max = np.maximum.accumulate(noisy_equity)
+        noisy_drawdown = (noisy_equity - noisy_rolling_max) / noisy_rolling_max * 100
+        noisy_max_dd = abs(np.min(noisy_drawdown))
+        noisy_total_ret = (noisy_equity[-1] - initial_capital) / initial_capital * 100
+        noise_calmar = (noisy_total_ret * (252 / 63) / noisy_max_dd) if noisy_max_dd > 0 else float('inf')
+        
+        noise_sharpes.append(noise_sharpe)
+        noise_calmars.append(noise_calmar)
+    
+    noise_sharpe_mean = np.mean(noise_sharpes)
+    noise_sharpe_std = np.std(noise_sharpes)
+    noise_calmar_mean = np.mean(noise_calmars)
+    noise_calmar_std = np.std(noise_calmars)
+    
+    sharpe_degradation = max(0, (original_sharpe - noise_sharpe_mean) / abs(original_sharpe)) if original_sharpe != 0 else 1.0
+    calmar_degradation = max(0, (original_calmar - noise_calmar_mean) / abs(original_calmar)) if original_calmar != 0 else 1.0
+    
+    is_fragile = (sharpe_degradation > degradation_threshold or calmar_degradation > degradation_threshold)
+    rejection_reason = f"参数脆弱: 夏普劣化 {sharpe_degradation*100:.1f}%, Calmar劣化 {calmar_degradation*100:.1f}%" if is_fragile else ""
+    
+    if verbose:
+        print(f"噪音环境: 夏普 {noise_sharpe_mean:.4f}±{noise_sharpe_std:.4f}, Calmar {noise_calmar_mean:.4f}±{noise_calmar_std:.4f}")
+        print(f"劣化程度: 夏普 {sharpe_degradation*100:.1f}%, Calmar {calmar_degradation*100:.1f}%")
+        print(f"判定: {'❌ 脆弱 - 拒绝' if is_fragile else '✓ 稳健 - 接受'}")
+        print(f"{'='*60}")
+    
+    return MonteCarloResult(
+        original_sharpe=original_sharpe, original_calmar=original_calmar,
+        noise_sharpe_mean=noise_sharpe_mean, noise_sharpe_std=noise_sharpe_std,
+        noise_calmar_mean=noise_calmar_mean, noise_calmar_std=noise_calmar_std,
+        sharpe_degradation=sharpe_degradation, calmar_degradation=calmar_degradation,
+        is_fragile=is_fragile, rejection_reason=rejection_reason
+    )

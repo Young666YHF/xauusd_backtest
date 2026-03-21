@@ -1,8 +1,14 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
 // Copyright © 2026 XAUUSD Dual Strategy
+//
+// 2026-03-21 v5.0 Critical Fixes:
+// - 增加每日熔断机制 (Daily Circuit Breaker)
+// - DST 动态感知 (Asia/Shanghai 时区)
+// - 非对称滑点模型 (止损惩罚，止盈无负滑点)
+// - 新闻事件过滤器 (Volume/ATR 突变检测)
 
 //@version=6
-strategy("XAUUSD Dual Strategy", overlay=true,
+strategy("XAUUSD Dual Strategy v5", overlay=true,
          initial_capital=100000,
          default_qty_type=strategy.fixed,
          default_qty_value=1,
@@ -70,6 +76,17 @@ european_end = input.int(0, "欧美盘结束(北京时间)", minval=0, maxval=6,
 enable_strategy_a = input.bool(true, "启用策略A (均值回归)", group="开关")
 enable_strategy_b = input.bool(true, "启用策略B (动量突破)", group="开关")
 
+// 【Critical Fix 4】熔断机制参数
+grp_circuit = "熔断机制"
+enable_circuit_breaker = input.bool(true, "启用每日熔断", group=grp_circuit)
+daily_max_drawdown_pct = input.float(3.0, "每日最大亏损%", minval=1.0, maxval=10.0, step=0.5, group=grp_circuit)
+
+// 【Critical Fix 4】新闻事件过滤参数
+grp_news = "新闻事件过滤"
+enable_news_filter = input.bool(true, "启用新闻过滤", group=grp_news)
+news_volume_spike_mult = input.float(3.0, "Volume突变倍数", minval=1.5, maxval=5.0, step=0.5, group=grp_news)
+news_atr_spike_mult = input.float(2.5, "ATR突变倍数", minval=1.5, maxval=5.0, step=0.5, group=grp_news)
+
 // ============================================
 // 技术指标计算
 // ============================================
@@ -135,6 +152,48 @@ var int confirmation_bars_left = 0
 avg_atr = ta.sma(atr, volatility_filter_period)
 current_range = high - low
 is_abnormal_volatility = current_range > avg_atr * volatility_filter_mult
+
+// ============================================
+// 【Critical Fix 4】新闻事件过滤器
+// ============================================
+
+avg_tick_volume = ta.sma(volume, 20)
+avg_atr_20 = ta.sma(atr, 20)
+
+is_volume_spike = enable_news_filter and (volume > avg_tick_volume * news_volume_spike_mult)
+is_atr_spike = enable_news_filter and (atr > avg_atr_20 * news_atr_spike_mult)
+is_news_event = is_volume_spike or is_atr_spike
+
+// 新闻事件后暂停交易 (简化版：当前K线不交易)
+is_trading_paused = is_news_event
+
+// ============================================
+// 【Critical Fix 4】每日熔断机制
+// ============================================
+
+var float daily_start_equity = strategy.initial_capital
+var int last_circuit_check_day = -1
+var bool circuit_breaker_triggered = false
+
+// 获取当前日期 (北京时间)
+current_day = dayofmonth(time, "Asia/Shanghai")
+current_month = month(time, "Asia/Shanghai")
+current_year = year(time, "Asia/Shanghai")
+
+// 新的一天，重置熔断状态
+if current_day != last_circuit_check_day
+    daily_start_equity := strategy.equity
+    circuit_breaker_triggered := false
+    last_circuit_check_day := current_day
+
+// 检查熔断条件
+current_drawdown_pct = (daily_start_equity - strategy.equity) / daily_start_equity * 100
+if enable_circuit_breaker and current_drawdown_pct >= daily_max_drawdown_pct and not circuit_breaker_triggered
+    circuit_breaker_triggered := true
+
+// 熔断触发时平掉所有仓位
+if circuit_breaker_triggered and strategy.position_size != 0
+    strategy.close_all(comment="熔断平仓")
 
 // ============================================
 // ATR动态时间止损计算
@@ -293,14 +352,17 @@ if pending_confirmation and not has_position
             pending_confirmation := false
 
 // ============================================
-// 入场信号
+// 入场信号 (增加熔断和新闻过滤检查)
 // ============================================
 
-long_signal_a = enable_strategy_a and is_asian_session and (close <= bb_lower) and (rsi < rsi_oversold) and not is_abnormal_volatility and not has_position and not pending_confirmation
-short_signal_a = enable_strategy_a and is_asian_session and (close >= bb_upper) and (rsi > rsi_overbought) and not is_abnormal_volatility and not has_position and not pending_confirmation
+// 熔断触发或新闻暂停时，不产生新信号
+can_trade = not circuit_breaker_triggered and not is_trading_paused
 
-long_signal_b_raw = enable_strategy_b and is_european_session and (close > bb_upper) and (bb_upper > kc_upper) and (ema_fast_val > ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position and not pending_confirmation
-short_signal_b_raw = enable_strategy_b and is_european_session and (close < bb_lower) and (bb_lower < kc_lower) and (ema_fast_val < ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position and not pending_confirmation
+long_signal_a = enable_strategy_a and is_asian_session and (close <= bb_lower) and (rsi < rsi_oversold) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
+short_signal_a = enable_strategy_a and is_asian_session and (close >= bb_upper) and (rsi > rsi_overbought) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
+
+long_signal_b_raw = enable_strategy_b and is_european_session and (close > bb_upper) and (bb_upper > kc_upper) and (ema_fast_val > ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
+short_signal_b_raw = enable_strategy_b and is_european_session and (close < bb_lower) and (bb_lower < kc_lower) and (ema_fast_val < ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
 
 // ============================================
 // 策略A入场执行
