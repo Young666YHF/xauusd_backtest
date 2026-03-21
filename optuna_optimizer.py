@@ -167,6 +167,11 @@ def calculate_calmar_ratio(
     - 使用日度收益率序列计算年化收益
     - 避免单值收益率导致的指数爆炸
 
+    【Critical Fix 9】时间降维灾难修复:
+    - 严禁使用 len(returns) 作为交易天数
+    - 如果传入 datetime 索引的 Series，使用实际经过的日历天数
+    - 确保 annual_factor 计算准确，修复因指数级压缩导致 Optuna 无法收敛
+
     Args:
         returns: 日度收益率序列（或K线收益率序列）
         max_drawdown: 最大回撤百分比（正数）
@@ -187,23 +192,67 @@ def calculate_calmar_ratio(
     # 计算总收益率
     total_return = (1 + returns).prod() - 1
 
-    # 计算实际交易天数
-    n_days = len(returns)
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【Critical Fix 9】时间降维灾难修复
+    # 严禁使用 len(returns) 作为交易天数
+    # ═══════════════════════════════════════════════════════════════════════
+    n_days = 0
+
+    # 检查是否为 datetime 索引
+    if isinstance(returns.index, pd.DatetimeIndex):
+        # 使用实际经过的日历天数
+        time_span = returns.index[-1] - returns.index[0]
+        n_days = time_span.days
+
+        if n_days <= 0:
+            # 如果时间跨度不足1天，使用小时数估算
+            n_days = max(1, time_span.total_seconds() / 86400)
+    else:
+        # 后备方案：尝试从索引推断
+        try:
+            if hasattr(returns.index, 'to_datetime'):
+                time_span = pd.to_datetime(returns.index[-1]) - pd.to_datetime(returns.index[0])
+                n_days = time_span.days
+        except:
+            pass
+
+    # 如果无法获取实际天数，使用序列长度作为后备（加警告）
+    if n_days <= 0:
+        # 最后的后备：使用序列长度，但需要根据 timeframe 调整
+        # 这是一个近似值，可能导致不准确的年化计算
+        bars_per_day = {
+            '1m': 1440,   # 1440 根 1 分钟 K 线 = 1 天
+            '5m': 288,    # 288 根 5 分钟 K 线 = 1 天
+            '15m': 96,    # 96 根 15 分钟 K 线 = 1 天
+            '30m': 48,    # 48 根 30 分钟 K 线 = 1 天
+            '1h': 24,     # 24 根 1 小时 K 线 = 1 天
+            '4h': 6,      # 6 根 4 小时 K 线 = 1 天
+            '1d': 1,      # 1 根日 K 线 = 1 天
+        }
+        bars_count = len(returns)
+        bars_per_day_est = bars_per_day.get(timeframe, 96)  # 默认 15m
+        n_days = max(1, bars_count / bars_per_day_est)
 
     if n_days <= 0:
         return 0.0
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 【Critical Fix 8】黄金/外汇市场年度交易日 = 260 天
+    # 【Critical Fix 9】黄金/外汇市场年度交易日 = 260 天
     # 股票市场有周末和节假日休市，约 252 交易日
     # 黄金/外汇市场周末休市但节假日较少，约 260 交易日
     # ═══════════════════════════════════════════════════════════════════════
     FOREX_TRADING_DAYS_PER_YEAR = 260
 
-    # 年化因子
-    # 使用复合年化: (1 + r)^{260/n_days} - 1
+    # 年化因子 - 使用实际天数计算
+    # annual_factor = 交易日数/年 / 实际交易天数
     # 防止极端值：限制年化因子范围
-    annual_factor = min(FOREX_TRADING_DAYS_PER_YEAR / max(n_days, 1), 10.0)  # 上限10年
+    annual_factor = FOREX_TRADING_DAYS_PER_YEAR / max(n_days, 1)
+
+    # 【Critical Fix 9】限制年化因子范围，防止指数爆炸
+    # 如果回测期间过短（如少于 26 天），年化因子会非常大
+    # 这会导致 (1 + r)^factor 的值极度敏感，Optuna 无法收敛
+    annual_factor = min(annual_factor, 10.0)  # 上限 10 年
+    annual_factor = max(annual_factor, 0.1)   # 下限 0.1 年
 
     if total_return > -1:  # 防止负收益导致数值错误
         annualized_return = (1 + total_return) ** annual_factor - 1

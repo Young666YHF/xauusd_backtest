@@ -118,6 +118,11 @@ EQUITY_SAMPLE_RATE = 100
 CONTRACT_SIZE = 100
 
 # ============================================================================
+# 【Critical Fix 9】策略并发支持参数
+# ============================================================================
+MAX_CONCURRENT_POSITIONS = 2  # 策略 A 和策略 B 各一个
+
+# ============================================================================
 # 【Critical Fix 1】非对称滑点模型参数
 # ============================================================================
 # 基础滑点参数
@@ -518,6 +523,7 @@ def _create_enhanced_numba_matcher():
     实现以下关键修复：
     1. 非对称滑点模型
     2. 保证金与爆仓检测
+    3. 【Critical Fix 9】策略并发支持
     """
     if NUMBA_AVAILABLE:
         @njit(cache=True, fastmath=True, nogil=True)
@@ -545,6 +551,10 @@ def _create_enhanced_numba_matcher():
             - 实时计算占用 Margin
             - Margin Call 自动清算
 
+            【Critical Fix 9】策略并发支持
+            - 支持策略 A 和策略 B 同时持仓
+            - 使用数组结构管理多个持仓插槽
+
             返回: (trades_record, equity_curve, total_trades, winning_trades, total_ticks, margin_calls)
             """
             n_ticks = len(ticks_array)
@@ -558,17 +568,26 @@ def _create_enhanced_numba_matcher():
             equity_curve[0] = initial_capital
             equity_idx = 1
 
-            # 持仓状态
-            is_in_position = False
-            current_direction = 0
-            entry_price = 0.0
-            entry_time = 0.0
-            entry_bar_idx = 0
-            current_sl = 0.0
-            highest_price = 0.0
-            lowest_price = 1e10
-            current_strategy = 0
-            position_value = 0.0  # 持仓市值
+            # ═══════════════════════════════════════════════════════════════════════
+            # 【Critical Fix 9】并发持仓状态 - 使用数组结构
+            # 支持策略 A (index 0) 和策略 B (index 1) 同时持仓
+            # ═══════════════════════════════════════════════════════════════════════
+            MAX_POS = 2  # 最大并发持仓数
+
+            # 持仓状态数组
+            pos_active = np.zeros(MAX_POS, dtype=np.int64)       # 是否激活
+            pos_direction = np.zeros(MAX_POS, dtype=np.int64)    # 方向: 1=多, -1=空
+            pos_entry_price = np.zeros(MAX_POS, dtype=np.float64)
+            pos_entry_time = np.zeros(MAX_POS, dtype=np.float64)
+            pos_entry_bar_idx = np.zeros(MAX_POS, dtype=np.int64)
+            pos_sl = np.zeros(MAX_POS, dtype=np.float64)
+            pos_highest = np.zeros(MAX_POS, dtype=np.float64)
+            pos_lowest = np.zeros(MAX_POS, dtype=np.float64)
+            pos_strategy = np.zeros(MAX_POS, dtype=np.int64)     # 策略: 1=A, 2=B
+
+            # 策略到持仓索引的映射: 策略 A -> 0, 策略 B -> 1
+            # 策略 1 (A) 使用 pos_slots[0]
+            # 策略 2 (B) 使用 pos_slots[1]
 
             prev_bar_idx_tracker = -1
 
@@ -607,62 +626,100 @@ def _create_enhanced_numba_matcher():
                     current_atr = 5.0
                     current_vwap = (tick_bid + tick_ask) / 2
 
+                is_new_bar = (bar_idx != prev_bar_idx_tracker)
+                prev_bar_idx_tracker = bar_idx
+
                 # ============================================================
-                # 【Critical Fix 2】保证金检查
+                # 遍历所有持仓进行出场检查和保证金检查
                 # ============================================================
-                if is_in_position:
-                    # 计算当前持仓市值
-                    if current_direction == 1:  # 多头
-                        position_value = tick_bid * contract_size * position_size
-                    else:  # 空头
-                        position_value = tick_ask * contract_size * position_size
+                for slot in range(MAX_POS):
+                    if pos_active[slot] == 0:
+                        continue
 
-                    # 计算占用保证金
-                    margin_used = position_value / leverage
+                    # 获取当前持仓状态
+                    current_direction = pos_direction[slot]
+                    entry_price = pos_entry_price[slot]
+                    entry_time = pos_entry_time[slot]
+                    entry_bar_idx = int(pos_entry_bar_idx[slot])
+                    current_sl = pos_sl[slot]
+                    highest_price = pos_highest[slot]
+                    lowest_price = pos_lowest[slot]
+                    current_strategy = int(pos_strategy[slot])
 
-                    # 计算账户净值
-                    if current_direction == 1:
-                        unrealized_pnl = (tick_bid - entry_price) * contract_size * position_size
-                    else:
-                        unrealized_pnl = (entry_price - tick_ask) * contract_size * position_size
-
-                    equity = capital + unrealized_pnl
-
-                    # 检查 Margin Call
-                    if margin_used > 0:
-                        margin_ratio = equity / margin_used
-
-                        if margin_ratio < margin_call_ratio:
-                            # 触发爆仓清算
-                            should_exit = True
-                            exit_reason = EXIT_REASON_MARGIN_CALL
-
-                            if current_direction == 1:
-                                # 多头爆仓：使用 Bid（不利价格）+ 惩罚滑点
-                                slippage = (BASE_SLIP + current_atr * STOP_LOSS_ATR_RATIO) * STOP_LOSS_SLIP_MULT
-                                exit_price = tick_bid - slippage
-                            else:
-                                # 空头爆仓：使用 Ask（不利价格）+ 惩罚滑点
-                                slippage = (BASE_SLIP + current_atr * STOP_LOSS_ATR_RATIO) * STOP_LOSS_SLIP_MULT
-                                exit_price = tick_ask + slippage
-
-                            margin_call_count += 1
-
-                # 出场检查
-                if is_in_position:
                     # 更新持仓期间最高/最低价
                     if current_direction == 1:
                         if tick_ask > highest_price:
+                            pos_highest[slot] = tick_ask
                             highest_price = tick_ask
                     else:
                         if tick_bid < lowest_price:
+                            pos_lowest[slot] = tick_bid
                             lowest_price = tick_bid
-
-                    is_new_bar = (bar_idx != prev_bar_idx_tracker)
-                    prev_bar_idx_tracker = bar_idx
 
                     bars_held = bar_idx - entry_bar_idx
 
+                    # ============================================================
+                    # 【Critical Fix 2】保证金检查
+                    # ============================================================
+                    if current_direction == 1:  # 多头
+                        position_value = tick_bid * contract_size * position_size
+                        unrealized_pnl = (tick_bid - entry_price) * contract_size * position_size
+                    else:  # 空头
+                        position_value = tick_ask * contract_size * position_size
+                        unrealized_pnl = (entry_price - tick_ask) * contract_size * position_size
+
+                    margin_used = position_value / leverage
+                    equity = capital + unrealized_pnl
+
+                    # Margin Call 检查
+                    should_exit_margin = False
+                    exit_reason_margin = EXIT_REASON_NONE
+                    exit_price_margin = 0.0
+
+                    if margin_used > 0:
+                        margin_ratio = equity / margin_used
+                        if margin_ratio < margin_call_ratio:
+                            should_exit_margin = True
+                            exit_reason_margin = EXIT_REASON_MARGIN_CALL
+                            slippage = (BASE_SLIP + current_atr * STOP_LOSS_ATR_RATIO) * STOP_LOSS_SLIP_MULT
+                            if current_direction == 1:
+                                exit_price_margin = tick_bid - slippage
+                            else:
+                                exit_price_margin = tick_ask + slippage
+                            margin_call_count += 1
+
+                    if should_exit_margin:
+                        # 执行爆仓清算
+                        actual_exit = exit_price_margin
+                        price_diff = (actual_exit - entry_price) * current_direction
+                        gross_pnl = price_diff * contract_size * position_size
+                        commission_cost = commission_per_lot * 2.0 * position_size
+                        pnl = gross_pnl - commission_cost
+                        pnl_pct = pnl / initial_capital * 100
+                        capital += pnl
+
+                        if trade_count < MAX_TRADES:
+                            trades_record[trade_count, TRADE_ENTRY_TIME] = entry_time
+                            trades_record[trade_count, TRADE_EXIT_TIME] = tick_time
+                            trades_record[trade_count, TRADE_DIRECTION] = float(current_direction)
+                            trades_record[trade_count, TRADE_ENTRY_PRICE] = entry_price
+                            trades_record[trade_count, TRADE_EXIT_PRICE] = actual_exit
+                            trades_record[trade_count, TRADE_PNL] = pnl
+                            trades_record[trade_count, TRADE_PNL_PCT] = pnl_pct
+                            trades_record[trade_count, TRADE_STRATEGY] = float(current_strategy)
+                            trades_record[trade_count, TRADE_EXIT_REASON] = float(exit_reason_margin)
+                            trades_record[trade_count, TRADE_BARS_HELD] = float(bars_held)
+                            trade_count += 1
+
+                        if pnl > 0:
+                            win_count += 1
+
+                        pos_active[slot] = 0
+                        continue
+
+                    # ============================================================
+                    # 常规出场检查
+                    # ============================================================
                     should_exit = False
                     exit_reason = EXIT_REASON_NONE
                     exit_price = tick_bid
@@ -671,13 +728,12 @@ def _create_enhanced_numba_matcher():
                     if current_strategy == 1:
                         if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
-                                # 【Critical Fix 1】止损：非对称滑点
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
                                 slippage = (BASE_SLIP + current_atr * STOP_LOSS_ATR_RATIO) * STOP_LOSS_SLIP_MULT
                                 if is_new_bar:
                                     slippage = slippage * GAP_SLIP_MULT
-                                exit_price = tick_bid - slippage  # 仅向不利方向
+                                exit_price = tick_bid - slippage
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
@@ -685,16 +741,15 @@ def _create_enhanced_numba_matcher():
                                 slippage = (BASE_SLIP + current_atr * STOP_LOSS_ATR_RATIO) * STOP_LOSS_SLIP_MULT
                                 if is_new_bar:
                                     slippage = slippage * GAP_SLIP_MULT
-                                exit_price = tick_ask + slippage  # 仅向不利方向
+                                exit_price = tick_ask + slippage
 
                         # VWAP 止盈
                         if not should_exit:
                             if current_direction == 1:
                                 if tick_bid >= current_vwap:
-                                    # 【Critical Fix 1】止盈：限价单，无负滑点
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    exit_price = current_vwap  # 严格按目标价成交
+                                    exit_price = current_vwap
                             else:
                                 if tick_ask <= current_vwap:
                                     should_exit = True
@@ -719,7 +774,7 @@ def _create_enhanced_numba_matcher():
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                slippage = strategy_b_slip * STOP_LOSS_SLIP_MULT  # 止损加惩罚
+                                slippage = strategy_b_slip * STOP_LOSS_SLIP_MULT
                                 if is_new_bar:
                                     slippage = slippage * GAP_SLIP_MULT
                                 exit_price = tick_bid - slippage
@@ -749,13 +804,11 @@ def _create_enhanced_numba_matcher():
                     # 执行出场
                     if should_exit:
                         actual_exit = exit_price
-
                         price_diff = (actual_exit - entry_price) * current_direction
                         gross_pnl = price_diff * contract_size * position_size
                         commission_cost = commission_per_lot * 2.0 * position_size
                         pnl = gross_pnl - commission_cost
                         pnl_pct = pnl / initial_capital * 100
-
                         capital += pnl
 
                         if trade_count < MAX_TRADES:
@@ -774,126 +827,143 @@ def _create_enhanced_numba_matcher():
                         if pnl > 0:
                             win_count += 1
 
-                        is_in_position = False
-                        current_direction = 0
+                        pos_active[slot] = 0
 
-                # 入场信号检查
-                if not is_in_position:
-                    while signal_idx < n_signals:
-                        sig_bar_idx = int(signals_array[signal_idx, SIG_EXEC_BAR_IDX])
+                # ============================================================
+                # 入场信号检查 - 支持并发
+                # ============================================================
+                while signal_idx < n_signals:
+                    sig_bar_idx = int(signals_array[signal_idx, SIG_EXEC_BAR_IDX])
 
-                        if sig_bar_idx == bar_idx:
-                            if signals_array[signal_idx, SIG_EXECUTED] == 0.0:
-                                sig_direction = int(signals_array[signal_idx, SIG_DIRECTION])
-                                sig_strategy = int(signals_array[signal_idx, SIG_STRATEGY])
-                                sig_sl = signals_array[signal_idx, SIG_STOP_LOSS]
-                                sig_entry_price = signals_array[signal_idx, SIG_ENTRY_PRICE]
+                    if sig_bar_idx == bar_idx:
+                        if signals_array[signal_idx, SIG_EXECUTED] == 0.0:
+                            sig_direction = int(signals_array[signal_idx, SIG_DIRECTION])
+                            sig_strategy = int(signals_array[signal_idx, SIG_STRATEGY])
+                            sig_sl = signals_array[signal_idx, SIG_STOP_LOSS]
+                            sig_entry_price = signals_array[signal_idx, SIG_ENTRY_PRICE]
 
-                                # 计算滑点
-                                if sig_strategy == 1:
-                                    slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * SLIP_MULT_A
-                                else:
-                                    slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_B) * SLIP_MULT_B
+                            # ═══════════════════════════════════════════════════════════════════════
+                            # 【Critical Fix 9】并发入场检查
+                            # 策略 A (sig_strategy=1) 使用 slot 0
+                            # 策略 B (sig_strategy=2) 使用 slot 1
+                            # ═══════════════════════════════════════════════════════════════════════
+                            slot = sig_strategy - 1  # 策略 1->slot 0, 策略 2->slot 1
 
-                                if sig_strategy == 1:
-                                    if sig_direction == 1:
-                                        if sig_sl > 0.0 and tick_ask <= sig_sl:
-                                            signals_array[signal_idx, SIG_EXECUTED] = 1.0
-                                            signal_idx += 1
-                                            continue
-                                        entry_px = tick_ask + slippage
-                                    else:
-                                        if sig_sl > 0.0 and tick_bid >= sig_sl:
-                                            signals_array[signal_idx, SIG_EXECUTED] = 1.0
-                                            signal_idx += 1
-                                            continue
-                                        entry_px = tick_bid - slippage
+                            # 检查该策略是否已有持仓
+                            if pos_active[slot] == 1:
+                                # 该策略已有持仓，跳过此信号
+                                signals_array[signal_idx, SIG_EXECUTED] = 1.0
+                                signal_idx += 1
+                                continue
 
-                                    is_in_position = True
-                                    current_direction = sig_direction
-                                    entry_price = entry_px
-                                    entry_time = tick_time
-                                    entry_bar_idx = bar_idx
-                                    current_sl = sig_sl
-                                    current_strategy = 1
-                                    highest_price = entry_px if sig_direction == 1 else 0.0
-                                    lowest_price = entry_px if sig_direction == -1 else 1e10
-                                    signals_array[signal_idx, SIG_EXECUTED] = 1.0
+                            # 计算滑点
+                            if sig_strategy == 1:
+                                slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_A) * SLIP_MULT_A
+                            else:
+                                slippage = (BASE_SLIP + current_atr * ATR_SLIP_RATIO_B) * SLIP_MULT_B
 
-                                elif sig_strategy == 2:
-                                    target_price = sig_entry_price
-
-                                    if target_price <= 0.0:
+                            # 策略 A 入场
+                            if sig_strategy == 1:
+                                if sig_direction == 1:
+                                    if sig_sl > 0.0 and tick_ask <= sig_sl:
                                         signals_array[signal_idx, SIG_EXECUTED] = 1.0
                                         signal_idx += 1
                                         continue
-
-                                    if sig_direction == 1 and tick_ask >= target_price:
-                                        entry_px = tick_ask + slippage
-                                        is_in_position = True
-                                        current_direction = 1
-                                        entry_price = entry_px
-                                        entry_time = tick_time
-                                        entry_bar_idx = bar_idx
-                                        current_sl = sig_sl
-                                        current_strategy = 2
-                                        highest_price = entry_px
-                                        lowest_price = 1e10
+                                    entry_px = tick_ask + slippage
+                                else:
+                                    if sig_sl > 0.0 and tick_bid >= sig_sl:
                                         signals_array[signal_idx, SIG_EXECUTED] = 1.0
-                                    elif sig_direction == -1 and tick_bid <= target_price:
-                                        entry_px = tick_bid - slippage
-                                        is_in_position = True
-                                        current_direction = -1
-                                        entry_price = entry_px
-                                        entry_time = tick_time
-                                        entry_bar_idx = bar_idx
-                                        current_sl = sig_sl
-                                        current_strategy = 2
-                                        highest_price = 0.0
-                                        lowest_price = entry_px
-                                        signals_array[signal_idx, SIG_EXECUTED] = 1.0
+                                        signal_idx += 1
+                                        continue
+                                    entry_px = tick_bid - slippage
 
-                            signal_idx += 1
+                                pos_active[slot] = 1
+                                pos_direction[slot] = sig_direction
+                                pos_entry_price[slot] = entry_px
+                                pos_entry_time[slot] = tick_time
+                                pos_entry_bar_idx[slot] = bar_idx
+                                pos_sl[slot] = sig_sl
+                                pos_strategy[slot] = 1
+                                pos_highest[slot] = entry_px if sig_direction == 1 else 0.0
+                                pos_lowest[slot] = entry_px if sig_direction == -1 else 1e10
+                                signals_array[signal_idx, SIG_EXECUTED] = 1.0
 
-                        elif sig_bar_idx > bar_idx:
-                            break
-                        else:
-                            signal_idx += 1
+                            # 策略 B 入场
+                            elif sig_strategy == 2:
+                                target_price = sig_entry_price
+
+                                if target_price <= 0.0:
+                                    signals_array[signal_idx, SIG_EXECUTED] = 1.0
+                                    signal_idx += 1
+                                    continue
+
+                                if sig_direction == 1 and tick_ask >= target_price:
+                                    entry_px = tick_ask + slippage
+                                    pos_active[slot] = 1
+                                    pos_direction[slot] = 1
+                                    pos_entry_price[slot] = entry_px
+                                    pos_entry_time[slot] = tick_time
+                                    pos_entry_bar_idx[slot] = bar_idx
+                                    pos_sl[slot] = sig_sl
+                                    pos_strategy[slot] = 2
+                                    pos_highest[slot] = entry_px
+                                    pos_lowest[slot] = 1e10
+                                    signals_array[signal_idx, SIG_EXECUTED] = 1.0
+                                elif sig_direction == -1 and tick_bid <= target_price:
+                                    entry_px = tick_bid - slippage
+                                    pos_active[slot] = 1
+                                    pos_direction[slot] = -1
+                                    pos_entry_price[slot] = entry_px
+                                    pos_entry_time[slot] = tick_time
+                                    pos_entry_bar_idx[slot] = bar_idx
+                                    pos_sl[slot] = sig_sl
+                                    pos_strategy[slot] = 2
+                                    pos_highest[slot] = 0.0
+                                    pos_lowest[slot] = entry_px
+                                    signals_array[signal_idx, SIG_EXECUTED] = 1.0
+
+                        signal_idx += 1
+
+                    elif sig_bar_idx > bar_idx:
+                        break
+                    else:
+                        signal_idx += 1
 
                 # 权益曲线采样
                 if tick_idx % EQUITY_SAMPLE_RATE == 0 and equity_idx < max_equity_points:
                     equity_curve[equity_idx] = capital
                     equity_idx += 1
 
-            # 强制平仓最后的持仓
-            if is_in_position:
-                last_tick_idx = n_ticks - 1
-                if current_direction == 1:
-                    exit_price = ticks_array[last_tick_idx, TICK_BID]
-                else:
-                    exit_price = ticks_array[last_tick_idx, TICK_ASK]
+            # 强制平仓所有剩余持仓
+            for slot in range(MAX_POS):
+                if pos_active[slot] == 1:
+                    last_tick_idx = n_ticks - 1
+                    if pos_direction[slot] == 1:
+                        exit_price = ticks_array[last_tick_idx, TICK_BID]
+                    else:
+                        exit_price = ticks_array[last_tick_idx, TICK_ASK]
 
-                price_diff = (exit_price - entry_price) * current_direction
-                gross_pnl = price_diff * contract_size * position_size
-                commission_cost = commission_per_lot * 2.0 * position_size
-                pnl = gross_pnl - commission_cost
-                capital += pnl
+                    price_diff = (exit_price - pos_entry_price[slot]) * pos_direction[slot]
+                    gross_pnl = price_diff * contract_size * position_size
+                    commission_cost = commission_per_lot * 2.0 * position_size
+                    pnl = gross_pnl - commission_cost
+                    capital += pnl
 
-                if trade_count < MAX_TRADES:
-                    trades_record[trade_count, TRADE_ENTRY_TIME] = entry_time
-                    trades_record[trade_count, TRADE_EXIT_TIME] = ticks_array[last_tick_idx, TICK_TIMESTAMP]
-                    trades_record[trade_count, TRADE_DIRECTION] = float(current_direction)
-                    trades_record[trade_count, TRADE_ENTRY_PRICE] = entry_price
-                    trades_record[trade_count, TRADE_EXIT_PRICE] = exit_price
-                    trades_record[trade_count, TRADE_PNL] = pnl
-                    trades_record[trade_count, TRADE_PNL_PCT] = pnl / initial_capital * 100
-                    trades_record[trade_count, TRADE_STRATEGY] = float(current_strategy)
-                    trades_record[trade_count, TRADE_EXIT_REASON] = float(EXIT_REASON_FORCE_CLOSE)
-                    trades_record[trade_count, TRADE_BARS_HELD] = 0.0
-                    trade_count += 1
+                    if trade_count < MAX_TRADES:
+                        trades_record[trade_count, TRADE_ENTRY_TIME] = pos_entry_time[slot]
+                        trades_record[trade_count, TRADE_EXIT_TIME] = ticks_array[last_tick_idx, TICK_TIMESTAMP]
+                        trades_record[trade_count, TRADE_DIRECTION] = float(pos_direction[slot])
+                        trades_record[trade_count, TRADE_ENTRY_PRICE] = pos_entry_price[slot]
+                        trades_record[trade_count, TRADE_EXIT_PRICE] = exit_price
+                        trades_record[trade_count, TRADE_PNL] = pnl
+                        trades_record[trade_count, TRADE_PNL_PCT] = pnl / initial_capital * 100
+                        trades_record[trade_count, TRADE_STRATEGY] = float(pos_strategy[slot])
+                        trades_record[trade_count, TRADE_EXIT_REASON] = float(EXIT_REASON_FORCE_CLOSE)
+                        trades_record[trade_count, TRADE_BARS_HELD] = 0.0
+                        trade_count += 1
 
-                if pnl > 0:
-                    win_count += 1
+                    if pnl > 0:
+                        win_count += 1
 
             trades_record = trades_record[:trade_count]
             equity_curve = equity_curve[:equity_idx]

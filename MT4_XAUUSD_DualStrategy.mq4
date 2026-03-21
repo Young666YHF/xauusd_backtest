@@ -404,12 +404,14 @@ void OnTick()
    // ═══════════════════════════════════════════════════════════════════
    // 【Critical Fix 2】持仓检查 - 实时遍历订单 (无状态)
    // ═══════════════════════════════════════════════════════════════════
-   bool hasPosition = false;
-   int positionTicket = -1;
-   int positionType = -1;
-   double positionSL = 0;
-   double positionOpenPrice = 0;
-   datetime positionOpenTime = 0;
+   // 【Critical Fix 9】支持多订单并发处理
+   // 定义数组存储所有持仓信息，支持策略 A 和策略 B 并发
+   int positionTickets[MAX_TRAILING_STOP_TRACKERS];
+   int positionTypes[MAX_TRAILING_STOP_TRACKERS];
+   double positionSLs[MAX_TRAILING_STOP_TRACKERS];
+   double positionOpenPrices[MAX_TRAILING_STOP_TRACKERS];
+   datetime positionOpenTimes[MAX_TRAILING_STOP_TRACKERS];
+   int positionCount = 0;
 
    int totalOrders = OrdersTotal();
 
@@ -424,23 +426,38 @@ void OnTick()
             // 只处理持仓订单 (OP_BUY 或 OP_SELL)
             if(orderType == OP_BUY || orderType == OP_SELL)
             {
-               hasPosition = true;
-               positionTicket = OrderTicket();
-               positionType = orderType;
-               positionSL = OrderStopLoss();
-               positionOpenPrice = OrderOpenPrice();
-               positionOpenTime = OrderOpenTime();
-               break;
+               if(positionCount < MAX_TRAILING_STOP_TRACKERS)
+               {
+                  positionTickets[positionCount] = OrderTicket();
+                  positionTypes[positionCount] = orderType;
+                  positionSLs[positionCount] = OrderStopLoss();
+                  positionOpenPrices[positionCount] = OrderOpenPrice();
+                  positionOpenTimes[positionCount] = OrderOpenTime();
+                  positionCount++;
+               }
+               // 【Critical Fix 9】移除 break; 遍历所有订单，支持多策略并发
             }
          }
       }
    }
 
    // ═══════════════════════════════════════════════════════════════════
-   // 持仓出场检查 - 每Tick实时执行
+   // 【Critical Fix 9】每次 Tick 必须清理追踪止损残余
+   // 防止因外部干预或熔断平仓的残余 Ticket 导致数组溢出
    // ═══════════════════════════════════════════════════════════════════
-   if(hasPosition)
+   CleanupTrailingStopTrackers();
+
+   // ═══════════════════════════════════════════════════════════════════
+   // 持仓出场检查 - 每Tick实时执行，支持多订单并发
+   // ═══════════════════════════════════════════════════════════════════
+   for(int p = 0; p < positionCount; p++)
    {
+      int positionTicket = positionTickets[p];
+      int positionType = positionTypes[p];
+      double positionSL = positionSLs[p];
+      double positionOpenPrice = positionOpenPrices[p];
+      datetime positionOpenTime = positionOpenTimes[p];
+
       // 【Critical Fix 2】实时计算持仓K线数
       int barsHeld = CalculateBarsHeld(positionOpenTime);
 
@@ -448,10 +465,13 @@ void OnTick()
       double highestPrice = 0, lowestPrice = 1000000;
       CalculatePositionExtremes(positionOpenTime, positionType, highestPrice, lowestPrice);
 
-      // 出场检查
+      // 出场检查 - 为每个订单独立调用
       CheckExitConditions(positionTicket, positionType, positionSL, positionOpenPrice,
                           atr, vwap, barsHeld, highestPrice, lowestPrice);
    }
+
+   // 判断是否有持仓（用于入场信号判断）
+   bool hasPosition = (positionCount > 0);
    else
    {
       // 无持仓时检查入场信号 (只在 newBar 时检测新信号)
@@ -654,71 +674,44 @@ double GetDailyVWAP()
 
 
 //+------------------------------------------------------------------+
-//| 【Critical Fix 5】计算外汇交易日                                  |
+//| 【Critical Fix 9】计算外汇交易日 - 简化版                         |
+//|                                                                   |
+//| 核心原则：                                                        |
+//| 正规券商服务器 00:00 已严格对齐美东 17:00 闭盘时间               |
+//| 因此无需将时间转换为北京时间再分割，直接使用服务器时间即可       |
+//|                                                                   |
 //| 外汇交易日从美东时间 17:00 开始，到次日 17:00 结束               |
+//| 服务器 00:00 = 美东 17:00 = 外汇交易日分界点                     |
 //+------------------------------------------------------------------+
 int GetForexTradingDay(datetime barTime)
 {
-   // 将服务器时间转换为北京时间（用于统一计算）
+   // ═══════════════════════════════════════════════════════════════════════
+   // 【Critical Fix 9】简化时区逻辑
+   //
+   // 券商服务器时间 00:00 已经对齐美东 17:00（外汇市场日线重置）
+   // 因此可以直接使用 TimeDayOfYear 判断交易日，无需复杂转换
+   // ═══════════════════════════════════════════════════════════════════════
+
+   // 使用年份和年积日唯一标识外汇交易日
+   int year = TimeYear(barTime);
+   int dayOfYear = TimeDayOfYear(barTime);
+
+   // 服务器时间的小时部分
    int serverHour = TimeHour(barTime);
-   int effectiveOffset = InpBrokerUTCOffset;
 
-   if(g_detectedDSTOffset != InpBrokerUTCOffset)
-   {
-      effectiveOffset = g_detectedDSTOffset;
-   }
+   // ═══════════════════════════════════════════════════════════════════════
+   // 关键判断：服务器时间 00:00-23:59 为一个外汇交易日
+   //
+   // 由于正规券商服务器 00:00 = 美东 17:00
+   // 所以服务器时间的"日"天然就是"外汇交易日"
+   //
+   // 例如：
+   // - 服务器 2026-03-21 00:00 - 23:59 = 外汇交易日 2026-03-21
+   // - 这对应美东 17:00 (2026-03-20) - 17:00 (2026-03-21)
+   // ═══════════════════════════════════════════════════════════════════════
 
-   // 北京时间 = 服务器时间 + (8 - UTC偏移)
-   int beijingHour = serverHour + (8 - effectiveOffset);
-   int beijingDay = TimeDay(barTime);
-
-   // 处理跨日
-   if(beijingHour >= 24)
-   {
-      beijingHour -= 24;
-      // 不增加天数，因为外汇交易日还没结束
-   }
-   else if(beijingHour < 0)
-   {
-      beijingHour += 24;
-   }
-
-   // 外汇交易日分界点：
-   // - 美东时间 17:00 = 北京时间 06:00 (冬令时) 或 05:00 (夏令时)
-   // - 使用 05:30 作为近似分界点
-   int FOREX_DAY_BOUNDARY_HOUR = 5;
-   int FOREX_DAY_BOUNDARY_MINUTE = 30;
-
-   int beijingMinute = TimeMinute(barTime);
-   int totalBeijingMinutes = beijingHour * 60 + beijingMinute;
-   int boundaryMinutes = FOREX_DAY_BOUNDARY_HOUR * 60 + FOREX_DAY_BOUNDARY_MINUTE;
-
-   // 如果在北京时间 05:30 之前，属于前一外汇交易日
-   int forexTradingDay = beijingDay;
-   if(totalBeijingMinutes < boundaryMinutes)
-   {
-      // 归属于前一天的外汇交易日
-      // 使用年份和年积日来唯一标识
-      int dayOfYear = TimeDayOfYear(barTime);
-      int year = TimeYear(barTime);
-
-      // 如果是年初，特殊处理
-      if(dayOfYear == 1)
-      {
-         // 前一天是去年最后一天
-         return (year - 1) * 1000 + 365;  // 简化处理
-      }
-      else
-      {
-         return year * 1000 + dayOfYear - 1;
-      }
-   }
-   else
-   {
-      int dayOfYear = TimeDayOfYear(barTime);
-      int year = TimeYear(barTime);
-      return year * 1000 + dayOfYear;
-   }
+   // 直接返回年份和年积日的组合
+   return year * 1000 + dayOfYear;
 }
 
 //+------------------------------------------------------------------+
