@@ -1,11 +1,20 @@
 """
 技术指标计算模块
 包含: VWAP, Bollinger Bands, Keltner Channels, ATR, RSI, EMA等
+
+【修复2.1】时区严格定义
+- 所有时段判断使用北京时间 (UTC+8)
+- 增加时区校验警告
 """
 
 import pandas as pd
 import numpy as np
 from typing import Tuple
+import warnings
+
+
+# 北京时区
+BEIJING_TZ = 'Asia/Shanghai'
 
 
 def calculate_vwap(df: pd.DataFrame) -> pd.Series:
@@ -220,14 +229,33 @@ def calculate_session_filter(
     """
     计算交易时段过滤器
 
+    【修复2.1】增加时区校验
+    - 参数默认为北京时间 (UTC+8)
+    - 如果数据时区不匹配，发出警告
+
     Args:
         df: 带有时区感知时间索引的DataFrame
-        asian_start, asian_end: 亚盘时段（北京时间）
-        european_start, european_end: 欧美盘时段（北京时间）
+        asian_start, asian_end: 亚盘时段（北京时间 UTC+8）
+        european_start, european_end: 欧美盘时段（北京时间 UTC+8）
 
     Returns:
         (is_asian_session, is_european_session)
     """
+    # 【修复2.1】时区校验
+    if df.index.tz is None:
+        warnings.warn(
+            "【时区警告】数据索引无时区信息！时段判断可能错误。\n"
+            f"参数设定为北京时间: 亚盘 {asian_start}:00-{asian_end}:00\n"
+            "请确保数据已正确转换为北京时间 (UTC+8)"
+        )
+    elif str(df.index.tz) != BEIJING_TZ:
+        # 转换为北京时间
+        warnings.warn(
+            f"【时区转换】数据时区为 {df.index.tz}，转换为北京时间 {BEIJING_TZ}"
+        )
+        df = df.copy()
+        df.index = df.index.tz_convert(BEIJING_TZ)
+
     hour = df.index.hour
 
     is_asian = (hour >= asian_start) & (hour < asian_end)

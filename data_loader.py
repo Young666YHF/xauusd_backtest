@@ -1,15 +1,61 @@
 """
 本地数据加载模块 - 从CSV文件加载tick数据并聚合成OHLCV
+
+【修复2.1】时区地雷问题
+- 强制时区校验与转换
+- 确保所有数据索引为北京时间 (UTC+8)
+- 防止参数学习错配
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
+import warnings
 
 
-def load_tick_data_from_csv(csv_path: str) -> pd.DataFrame:
+# 北京时区 (UTC+8)
+BEIJING_TZ = 'Asia/Shanghai'
+UTC_TZ = 'UTC'
+
+
+def validate_and_convert_timezone(df: pd.DataFrame, expected_tz: str = BEIJING_TZ) -> pd.DataFrame:
+    """
+    【修复2.1】时区校验与转换
+
+    确保DataFrame的时间索引为北京时间(UTC+8)
+
+    Args:
+        df: 待校验的DataFrame
+        expected_tz: 目标时区，默认北京时间
+
+    Returns:
+        时区转换后的DataFrame
+
+    Raises:
+        ValueError: 如果无法确定时区信息
+    """
+    if df.index.tz is None:
+        # 无时区信息 - 需要推断或假设
+        warnings.warn(
+            "【时区警告】数据索引无时区信息！"
+            "\n假设数据为 UTC+0，将转换为北京时间(UTC+8)"
+            "\n如果数据实际为北京时间，请手动设置: df.index = df.index.tz_localize('Asia/Shanghai')"
+        )
+        # 假设原始数据为 UTC+0
+        df.index = df.index.tz_localize(UTC_TZ).tz_convert(expected_tz)
+    else:
+        # 有时区信息 - 直接转换
+        df.index = df.index.tz_convert(expected_tz)
+
+    return df
+
+
+def load_tick_data_from_csv(
+    csv_path: str,
+    assume_timezone: Optional[str] = None
+) -> pd.DataFrame:
     """
     从CSV文件加载tick数据
 
@@ -17,6 +63,7 @@ def load_tick_data_from_csv(csv_path: str) -> pd.DataFrame:
 
     Args:
         csv_path: CSV文件路径
+        assume_timezone: 假设的原始时区 (None表示自动推断UTC+0)
 
     Returns:
         DataFrame with columns: [timestamp, ask, bid, ask_volume, bid_volume]
@@ -30,8 +77,18 @@ def load_tick_data_from_csv(csv_path: str) -> pd.DataFrame:
     # 解析时间戳
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
+    # 【修复2.1】时区处理
+    if assume_timezone:
+        df['timestamp'] = df['timestamp'].dt.tz_localize(assume_timezone)
+    elif df['timestamp'].dt.tz is None:
+        # 假设原始数据为 UTC+0
+        df['timestamp'] = df['timestamp'].dt.tz_localize(UTC_TZ)
+
     # 设置时间索引
     df.set_index('timestamp', inplace=True)
+
+    # 转换为北京时间
+    df = validate_and_convert_timezone(df, BEIJING_TZ)
 
     # 计算中间价格
     df['price'] = (df['ask'] + df['bid']) / 2

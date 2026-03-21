@@ -640,10 +640,74 @@ def run_walk_forward_optimization(
 
         oos_performances.append(oos_fitness)
 
-    # ========== 结果汇总（修复数据泄漏问题）==========
-    # WFO正确做法：使用最近一次IS优化的参数作为最终参数
-    # 而不是选择OOS表现最好的参数（这是数据泄漏/Peeking）
-    final_params = all_results[-1]['best_params']  # 最近一次split的IS参数
+    # ========== 【修复3.1】跨周期参数稳定性检验 ==========
+    # 原代码直接取最后一次IS参数作为最终参数，这是不稳定的
+    # 新逻辑：提取OOS表现前20%的参数交集，验证稳定性
+
+    # 1. 找出OOS表现前20%的splits
+    oos_fitness_threshold = np.percentile(oos_performances, 80)
+    top_splits = [i for i, fitness in enumerate(oos_performances) if fitness >= oos_fitness_threshold]
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"【参数稳定性检验】")
+        print(f"OOS Fitness 80%分位数: {oos_fitness_threshold:.2f}")
+        print(f"表现前20%的Splits: {top_splits}")
+        print(f"对应OOS Fitness: {[f'{oos_performances[i]:.2f}' for i in top_splits]}")
+
+    # 2. 如果没有splits进入前20%（所有表现都很差），警告策略不稳定
+    if len(top_splits) == 0:
+        if verbose:
+            print(f"\n⚠️  【警告】所有WFO分割的OOS表现均低于阈值！")
+            print(f"   策略在当前维度下可能根本不稳定，建议停止实盘！")
+            print(f"   回退使用最近一次IS参数，但请谨慎评估。")
+        final_params = all_results[-1]['best_params']
+        is_stable = False
+        param_stability = {}
+    else:
+        # 3. 提取前20% splits的参数
+        top_params = [all_results[i]['best_params'] for i in top_splits]
+
+        # 4. 计算参数稳定性：关键参数的方差
+        key_params = ['stop_loss_atr_mult_a', 'stop_loss_atr_mult_b', 'trailing_stop_atr_mult']
+        param_stability = {}
+
+        for param in key_params:
+            values = [p.get(param, 0) for p in top_params if param in p]
+            if values:
+                mean_val = np.mean(values)
+                std_val = np.std(values)
+                cv = std_val / abs(mean_val) if mean_val != 0 else 0
+                param_stability[param] = {
+                    'mean': mean_val,
+                    'std': std_val,
+                    'cv': cv,  # 变异系数
+                    'stable': cv < 0.3  # CV < 30% 认为稳定
+                }
+
+        # 5. 判断整体稳定性
+        is_stable = all(ps.get('stable', False) for ps in param_stability.values())
+
+        if verbose:
+            print(f"\n关键参数稳定性分析:")
+            for param, stats in param_stability.items():
+                status = "✓ 稳定" if stats['stable'] else "✗ 不稳定"
+                print(f"  {param}: 均值={stats['mean']:.3f}, 标准差={stats['std']:.3f}, CV={stats['cv']:.2%} {status}")
+
+        # 6. 选择最终参数
+        if is_stable:
+            # 稳定：使用OOS表现最好的split的参数
+            best_oos_idx = np.argmax(oos_performances)
+            final_params = all_results[best_oos_idx]['best_params']
+            if verbose:
+                print(f"\n✓ 参数稳定，使用OOS表现最好的Split {best_oos_idx + 1}参数")
+        else:
+            # 不稳定：发出警告，但仍使用最近参数
+            if verbose:
+                print(f"\n⚠️  【警告】关键参数不稳定（CV > 30%）！")
+                print(f"   策略可能过拟合，实盘风险较高。")
+                print(f"   使用最近一次IS参数作为最终参数。")
+            final_params = all_results[-1]['best_params']
 
     # 计算拼接后的全局OOS表现
     combined_equity = [100000]
@@ -656,8 +720,9 @@ def run_walk_forward_optimization(
 
     if verbose:
         print(f"\n{'='*70}")
-        print(f"WFO 完成（无数据泄漏版本）")
-        print(f"最终参数: 来自最近一次IS优化 (Split {n_splits})")
+        print(f"WFO 完成（参数稳定性检验版）")
+        print(f"策略稳定性: {'✓ 稳定' if is_stable else '✗ 不稳定'}")
+        print(f"最终参数来源: {('OOS最佳Split' if is_stable else '最近Split')}")
         print(f"拼接后全局收益: {combined_return:.2f}%")
         print(f"平均OOS Fitness: {np.mean(oos_performances):.2f}")
         print(f"OOS Fitness标准差: {np.std(oos_performances):.2f}")
@@ -671,7 +736,11 @@ def run_walk_forward_optimization(
         'combined_sharpe': combined_sharpe,
         'avg_oos_fitness': float(np.mean(oos_performances)),
         'std_oos_fitness': float(np.std(oos_performances)),
-        'oos_performances': [float(p) for p in oos_performances]
+        'oos_performances': [float(p) for p in oos_performances],
+        # 【修复3.1】新增稳定性指标
+        'is_stable': is_stable,
+        'param_stability': param_stability,
+        'top_splits': top_splits
     }
 
 

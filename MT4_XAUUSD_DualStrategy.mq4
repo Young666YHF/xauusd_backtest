@@ -65,6 +65,9 @@ input int    InpAsianEndBJ = 14;         // 亚盘结束小时 (北京时间 UTC
 input int    InpEuropeanStartBJ = 15;    // 欧美盘开始小时 (北京时间 UTC+8)
 input int    InpEuropeanEndBJ = 0;       // 欧美盘结束小时 (北京时间 UTC+8, 0表示次日0点)
 
+// 【修复1.4 新增】最大点差过滤 (防止结算期点差飙升)
+input double InpMaxSpread = 50.0;        // 最大允许点差 (点值, XAUUSD典型点差约30-50)
+
 // 交易设置
 input double InpLotSize = 1.0;           // 交易手数
 input int    InpSlippage = 30;           // 滑点 (点)
@@ -126,6 +129,16 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // ═══════════════════════════════════════════════════════════════════
+   // 【修复1.4】最大点差过滤 (防止结算期点差飙升)
+   // ═══════════════════════════════════════════════════════════════════
+   double currentSpread = MarketInfo(Symbol(), MODE_SPREAD);
+   if(currentSpread > InpMaxSpread)
+   {
+      // 点差过大，拒绝交易
+      return;
+   }
+
    // 检查新K线形成
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
@@ -227,6 +240,21 @@ void OnTick()
       // 入场信号检查 (只在 newBar 时检测新信号)
       if(newBar)
       {
+         // ═══════════════════════════════════════════════════════════════════
+         // 【修复1.1】挂单幽灵内存泄漏 - 每根新K线递减确认倒计时
+         // ═══════════════════════════════════════════════════════════════════
+         if(g_pendingConfirmation)
+         {
+            g_confirmationBarsLeft--;
+            Print("【挂单倒计时】剩余K线: ", g_confirmationBarsLeft);
+
+            if(g_confirmationBarsLeft < 0)
+            {
+               Print("【挂单过期】趋势失效，重置挂单状态");
+               ResetPullbackState();
+            }
+         }
+
          // 策略A检查 - 均值回归
          if(InpEnableStrategyA && isAsian && !g_pendingConfirmation)
          {
@@ -282,16 +310,17 @@ bool IsEuropeanSession()
 }
 
 //+------------------------------------------------------------------+
-//| 【终极修复】动态、无状态的 VWAP 计算                              |
-//| 每次调用从当日 00:00 遍历到当前 K 线，无缓存依赖                  |
+//| 【修复1.2】动态、无状态的 VWAP 计算 (消除前视偏差)                |
+//| 只计算已收盘K线 (i>=1)，排除当前未收盘K线 (i=0)                   |
 //+------------------------------------------------------------------+
 double GetDailyVWAP()
 {
    datetime currentDate = iTime(NULL, PERIOD_D1, 0);
    double dailyTPV = 0, dailyVolume = 0;
 
-   // 从当前 K 线 (i=0) 往回遍历，直到跨日
-   for(int i = 0; i < 96; i++)
+   // 【关键修复】从 i=1 (已收盘K线) 开始遍历，排除 i=0 (当前未收盘K线)
+   // 这消除了前视偏差：当前K线的TPV会随Tick跳动剧烈漂移
+   for(int i = 1; i < 96; i++)
    {
       datetime barTime = iTime(NULL, PERIOD_M15, i);
       if(barTime < currentDate) break;  // 超出当日范围
@@ -302,7 +331,7 @@ double GetDailyVWAP()
       dailyVolume += vol;
    }
 
-   return (dailyVolume > 0) ? (dailyTPV / dailyVolume) : iClose(NULL, PERIOD_M15, 0);
+   return (dailyVolume > 0) ? (dailyTPV / dailyVolume) : iClose(NULL, PERIOD_M15, 1);
 }
 
 //+------------------------------------------------------------------+
@@ -577,7 +606,7 @@ void CheckPendingEntryEveryTick(double currentATR)
 //| 【终极修复】MQL4 原生下单函数                                     |
 //| 使用标准 MT4 OrderSend 语法                                       |
 //| 实盘容错：Error 138/146 重试机制                                  |
-//| 【任务3 新增】StopLevel 防御机制，防止 Error 130                  |
+//| 【修复1.3】StopLevel 防御机制 - 拒绝止损过近的交易                |
 //+------------------------------------------------------------------+
 bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
 {
@@ -602,7 +631,8 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
    // 规范化价格精度
    int digits = (int)MarketInfo(Symbol(), MODE_DIGITS);
 
-   // 【任务3 新增】StopLevel 防御机制 - 防止 Error 130
+   // 【修复1.3】StopLevel 防御机制 - 止损过近必须放弃交易
+   // 原代码会自动拓宽止损，这是极端危险的！
    double stopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL) * Point;
 
    if(orderType == OP_BUY)
@@ -610,9 +640,11 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
       // 多头止损必须低于入场价至少 stopLevel 距离
       if(sl > 0 && price - sl < stopLevel)
       {
-         double originalSL = sl;
-         sl = price - stopLevel;
-         Print("【StopLevel修正】多头止损过近: 原止损=", originalSL, " 修正后=", sl);
+         // 【关键修复】放弃该笔交易，绝不擅自拓宽止损
+         Print("【风控拒绝】多头止损过近: 入场价=", price, " 止损=", sl,
+               " 距离=", (price - sl) / Point, "点 < StopLevel=", stopLevel / Point, "点");
+         Print("【风控拒绝】放弃交易，保护风险敞口");
+         return false;
       }
    }
    else // OP_SELL
@@ -620,9 +652,11 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
       // 空头止损必须高于入场价至少 stopLevel 距离
       if(sl > 0 && sl - price < stopLevel)
       {
-         double originalSL = sl;
-         sl = price + stopLevel;
-         Print("【StopLevel修正】空头止损过近: 原止损=", originalSL, " 修正后=", sl);
+         // 【关键修复】放弃该笔交易，绝不擅自拓宽止损
+         Print("【风控拒绝】空头止损过近: 入场价=", price, " 止损=", sl,
+               " 距离=", (sl - price) / Point, "点 < StopLevel=", stopLevel / Point, "点");
+         Print("【风控拒绝】放弃交易，保护风险敞口");
+         return false;
       }
    }
 
@@ -695,12 +729,47 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
 }
 
 //+------------------------------------------------------------------+
-//| 更新持仓统计                                                      |
+//| 【修复1.5】更新持仓统计 - Tick级极值捕获                          |
+//| 多头比较Ask，空头比较Bid，捕获瞬间极值                            |
 //+------------------------------------------------------------------+
 void UpdatePositionStats(double high, double low)
 {
-   g_highestSinceEntry = MathMax(g_highestSinceEntry, high);
-   g_lowestSinceEntry = MathMin(g_lowestSinceEntry, low);
+   // 遍历持仓获取方向
+   int totalOrders = OrdersTotal();
+   int positionType = -1;
+
+   for(int i = totalOrders - 1; i >= 0; i--)
+   {
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber)
+         {
+            positionType = OrderType();
+            break;
+         }
+      }
+   }
+
+   // 【关键修复】Tick级极值捕获
+   // 多头：比较Ask（最高买入价），空头：比较Bid（最低卖出价）
+   if(positionType == OP_BUY)
+   {
+      // 多头追踪最高价，应该用Ask
+      g_highestSinceEntry = MathMax(g_highestSinceEntry, Ask);
+      g_lowestSinceEntry = MathMin(g_lowestSinceEntry, Bid);
+   }
+   else if(positionType == OP_SELL)
+   {
+      // 空头追踪最低价，应该用Bid
+      g_highestSinceEntry = MathMax(g_highestSinceEntry, Ask);
+      g_lowestSinceEntry = MathMin(g_lowestSinceEntry, Bid);
+   }
+   else
+   {
+      // 无持仓时使用K线高低价
+      g_highestSinceEntry = MathMax(g_highestSinceEntry, high);
+      g_lowestSinceEntry = MathMin(g_lowestSinceEntry, low);
+   }
 }
 
 //+------------------------------------------------------------------+

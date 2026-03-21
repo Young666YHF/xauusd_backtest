@@ -243,7 +243,13 @@ if pending_confirmation and not has_position
     confirmation_bars_left := confirmation_bars_left - 1
 
     if confirmation_bars_left < 0
+        // 【修复】挂单过期时，完整重置所有状态变量
         pending_confirmation := false
+        pending_direction := 0
+        pending_breakout_high := 0.0
+        pending_breakout_low := 0.0
+        pending_atr := 0.0
+        confirmation_bars_left := 0
 
     // 多头: 价格突破高点时入场
     if pending_direction == 1
