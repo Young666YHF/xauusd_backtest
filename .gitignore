@@ -1,42 +1,58 @@
+# Dependencies
+node_modules/
+
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.egg-info/
-dist/
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Jupyter
-.ipynb_checkpoints/
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
 
 # IDE
-.vscode/
 .idea/
+.vscode/
 *.swp
 *.swo
+*~
 
-# Data
-*.csv
-*.parquet
-!sample_data.csv
-
-# Results
+# Project specific
 results/
-*.json
-!presets.json
-
-# Logs
 *.log
+*.csv
+*.xlsx
+
+# Data (large files)
+xauusd_data/
+*.pkl
+*.pickle
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Node
-node_modules/
-.web/
-
-# Build
-*.exe
-*.dll
+# Secrets
+.env
+*.env
+secrets.py
+config_local.py

@@ -1,181 +1,259 @@
 """
-数据加载模块
-============
-支持从CSV加载Tick数据并聚合为OHLCV
+本地数据加载模块 - 从CSV文件加载tick数据并聚合成OHLCV
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from typing import Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
 
 
-def load_tick_data_from_csv(filepath: str) -> pd.DataFrame:
+def load_tick_data_from_csv(csv_path: str) -> pd.DataFrame:
     """
-    从CSV文件加载Tick数据
+    从CSV文件加载tick数据
+
+    数据格式: timestamp, ask, bid, ask_volume, bid_volume
 
     Args:
-        filepath: CSV文件路径
+        csv_path: CSV文件路径
 
     Returns:
-        DataFrame with columns: bid, ask, volume
-        Index: datetime
+        DataFrame with columns: [timestamp, ask, bid, ask_volume, bid_volume]
     """
-    df = pd.read_csv(filepath)
+    df = pd.read_csv(
+        csv_path,
+        header=None,
+        names=['timestamp', 'ask', 'bid', 'ask_volume', 'bid_volume']
+    )
 
-    # 尝试不同的时间列名称
-    time_col = None
-    for col in ['timestamp', 'time', 'datetime', 'date']:
-        if col in df.columns:
-            time_col = col
-            break
+    # 解析时间戳
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    if time_col is None:
-        # 如果没有时间列，尝试使用第一列
-        time_col = df.columns[0]
+    # 设置时间索引
+    df.set_index('timestamp', inplace=True)
 
-    df[time_col] = pd.to_datetime(df[time_col])
-    df = df.set_index(time_col)
-    df = df.sort_index()
+    # 计算中间价格
+    df['price'] = (df['ask'] + df['bid']) / 2
 
-    # 标准化列名
-    column_mapping = {}
-    for col in df.columns:
-        col_lower = col.lower()
-        if 'bid' in col_lower:
-            column_mapping[col] = 'bid'
-        elif 'ask' in col_lower:
-            column_mapping[col] = 'ask'
-        elif 'volume' in col_lower or 'vol' in col_lower:
-            column_mapping[col] = 'volume'
-
-    if column_mapping:
-        df = df.rename(columns=column_mapping)
-
-    # 如果没有volume列，创建一个默认值
-    if 'volume' not in df.columns:
-        df['volume'] = 1
-
-    # 确保有bid和ask
-    if 'bid' not in df.columns or 'ask' not in df.columns:
-        # 尝试从其他列推断
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        if len(numeric_cols) >= 2:
-            df['bid'] = df[numeric_cols[0]]
-            df['ask'] = df[numeric_cols[1]]
-        elif len(numeric_cols) == 1:
-            df['bid'] = df[numeric_cols[0]]
-            df['ask'] = df[numeric_cols[0]]
-
-    return df[['bid', 'ask', 'volume']]
+    return df
 
 
-def ticks_to_ohlcv(ticks_df: pd.DataFrame, interval: str = '15min') -> pd.DataFrame:
+def ticks_to_ohlcv(df: pd.DataFrame, interval: str = '15min') -> pd.DataFrame:
     """
-    将Tick数据聚合为OHLCV数据
+    将tick数据聚合成OHLCV数据
 
     Args:
-        ticks_df: Tick数据DataFrame
-        interval: 聚合间隔
+        df: tick数据DataFrame (包含 'price', 'ask_volume', 'bid_volume' 列)
+        interval: 聚合周期 (15T=15分钟, 1H=1小时, 1D=1天)
 
     Returns:
         OHLCV DataFrame
     """
-    # 使用中间价计算OHLC
-    mid_price = (ticks_df['bid'] + ticks_df['ask']) / 2
+    # 计算成交量（使用ask_volume + bid_volume的平均值）
+    df['volume'] = (df['ask_volume'] + df['bid_volume']) / 2
 
-    ohlcv = pd.DataFrame()
-    ohlcv['Open'] = mid_price.resample(interval).first()
-    ohlcv['High'] = mid_price.resample(interval).max()
-    ohlcv['Low'] = mid_price.resample(interval).min()
-    ohlcv['Close'] = mid_price.resample(interval).last()
-    ohlcv['Volume'] = ticks_df['volume'].resample(interval).sum()
+    # 按时间周期聚合
+    ohlc = df['price'].resample(interval).ohlc()
+    volume = df['volume'].resample(interval).sum()
 
-    # 删除空值
+    # 合并数据
+    ohlcv = ohlc.copy()
+    ohlcv['Volume'] = volume
+
+    # 标准化列名
+    ohlcv.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+
+    # 删除缺失值
     ohlcv = ohlcv.dropna()
 
     return ohlcv
 
 
-def load_data_range(data_dir: str, start_date: str, end_date: str) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def load_monthly_data(
+    data_dir: str,
+    year: int,
+    month: int,
+    interval: str = '15min'
+) -> Optional[pd.DataFrame]:
     """
-    加载指定日期范围的数据
+    加载指定月份的tick数据并聚合
 
     Args:
-        data_dir: 数据目录
-        start_date: 开始日期 (YYYY-MM-DD)
-        end_date: 结束日期 (YYYY-MM-DD)
+        data_dir: 数据目录路径
+        year: 年份
+        month: 月份
+        interval: 聚合周期
 
     Returns:
-        (ticks_df, ohlcv_df)
+        OHLCV DataFrame 或 None（如果文件不存在）
     """
-    from pathlib import Path
+    filename = f"XAUUSD_{year}-{month:02d}.csv"
+    filepath = Path(data_dir) / filename
 
-    data_path = Path(data_dir)
+    if not filepath.exists():
+        print(f"文件不存在: {filepath}")
+        return None
+
+    print(f"加载数据: {filename}")
+
+    try:
+        # 加载tick数据
+        tick_df = load_tick_data_from_csv(str(filepath))
+
+        print(f"  原始tick数: {len(tick_df):,}")
+
+        # 聚合成OHLCV
+        ohlcv = ticks_to_ohlcv(tick_df, interval)
+
+        print(f"  聚合后K线数: {len(ohlcv):,}")
+        print(f"  时间范围: {ohlcv.index[0]} 到 {ohlcv.index[-1]}")
+
+        return ohlcv
+
+    except Exception as e:
+        print(f"加载 {filename} 失败: {e}")
+        return None
+
+
+def load_data_range(
+    data_dir: str,
+    start_date: str,
+    end_date: str,
+    interval: str = '15min'
+) -> pd.DataFrame:
+    """
+    加载指定日期范围内的数据
+
+    Args:
+        data_dir: 数据目录路径
+        start_date: 开始日期 (YYYY-MM-DD)
+        end_date: 结束日期 (YYYY-MM-DD)
+        interval: 聚合周期
+
+    Returns:
+        合并后的OHLCV DataFrame
+    """
     start = pd.to_datetime(start_date)
     end = pd.to_datetime(end_date)
 
-    # 生成月份列表
+    # 生成需要加载的月份列表
     months = []
     current = start.replace(day=1)
     while current <= end:
-        months.append(current.strftime('%Y-%m'))
+        months.append((current.year, current.month))
+        # 移动到下一个月
         if current.month == 12:
             current = current.replace(year=current.year + 1, month=1)
         else:
             current = current.replace(month=current.month + 1)
 
-    all_ticks = []
-    for m in months:
-        filepath = data_path / f'XAUUSD_{m}.csv'
-        if filepath.exists():
-            tick_df = load_tick_data_from_csv(str(filepath))
-            all_ticks.append(tick_df)
+    # 加载每个月的数据
+    dfs = []
+    for year, month in months:
+        df = load_monthly_data(data_dir, year, month, interval)
+        if df is not None:
+            dfs.append(df)
 
-    if not all_ticks:
-        raise ValueError(f"No data found for {start_date} to {end_date}")
+    if not dfs:
+        raise ValueError(f"未找到 {start_date} 到 {end_date} 的数据")
 
-    ticks_df = pd.concat(all_ticks).sort_index()
-    ticks_df = ticks_df[~ticks_df.index.duplicated(keep='first')]
+    # 合并数据
+    combined = pd.concat(dfs)
 
-    # 过滤日期范围
-    ticks_df = ticks_df[(ticks_df.index >= start) & (ticks_df.index <= end)]
+    # 按时间排序
+    combined = combined.sort_index()
 
-    ohlcv_df = ticks_to_ohlcv(ticks_df, '15min')
+    # 过滤指定日期范围
+    combined = combined[(combined.index >= start) & (combined.index <= end)]
 
-    return ticks_df, ohlcv_df
+    # 删除重复索引
+    combined = combined[~combined.index.duplicated(keep='first')]
+
+    print(f"\n{'='*60}")
+    print(f"数据加载完成")
+    print(f"{'='*60}")
+    print(f"总K线数: {len(combined):,}")
+    print(f"时间范围: {combined.index[0]} 到 {combined.index[-1]}")
+    print(f"价格范围: {combined['Low'].min():.2f} - {combined['High'].max():.2f}")
+
+    return combined
 
 
-def generate_sample_data(days: int = 60) -> pd.DataFrame:
+def load_local_15min_data(
+    data_dir: str = '/home/ctyun/xauusd_data',
+    months: Optional[List[str]] = None,
+    interval: str = '15min'
+) -> pd.DataFrame:
     """
-    生成模拟测试数据
+    加载本地15分钟数据（简化接口）
 
     Args:
-        days: 生成的天数
+        data_dir: 数据目录路径
+        months: 月份列表 ['2025-08', '2025-09', ...]，默认为None（加载所有可用数据）
 
     Returns:
         OHLCV DataFrame
     """
-    np.random.seed(42)
+    if months is None:
+        # 自动加载所有可用月份
+        data_path = Path(data_dir)
+        csv_files = sorted(data_path.glob('XAUUSD_*.csv'))
 
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)
+        dfs = []
+        for filepath in csv_files:
+            try:
+                tick_df = load_tick_data_from_csv(str(filepath))
+                ohlcv = ticks_to_ohlcv(tick_df, interval)
+                dfs.append(ohlcv)
+                print(f"✓ {filepath.name}: {len(ohlcv)} 条K线")
+            except Exception as e:
+                print(f"✗ {filepath.name}: {e}")
 
-    # 生成15分钟K线
-    n_bars = days * 24 * 4
-    dates = pd.date_range(start=start_date, periods=n_bars, freq='15min')
+        if not dfs:
+            raise ValueError("未找到任何数据文件")
 
-    # 模拟价格
-    base_price = 2000  # XAUUSD 基准价格
-    returns = np.random.randn(n_bars) * 0.002
-    prices = base_price * np.cumprod(1 + returns)
+        combined = pd.concat(dfs)
+        combined = combined.sort_index()
+        combined = combined[~combined.index.duplicated(keep='first')]
 
-    # 生成OHLCV
-    df = pd.DataFrame(index=dates)
-    df['Open'] = prices
-    df['High'] = prices * (1 + np.abs(np.random.randn(n_bars)) * 0.001)
-    df['Low'] = prices * (1 - np.abs(np.random.randn(n_bars)) * 0.001)
-    df['Close'] = prices * (1 + np.random.randn(n_bars) * 0.001)
-    df['Volume'] = np.random.randint(100, 1000, n_bars)
+        return combined
+    else:
+        # 加载指定月份
+        dfs = []
+        for month_str in months:
+            year, month = map(int, month_str.split('-'))
+            df = load_monthly_data(data_dir, year, month, interval)
+            if df is not None:
+                dfs.append(df)
 
-    return df
+        combined = pd.concat(dfs)
+        combined = combined.sort_index()
+        combined = combined[~combined.index.duplicated(keep='first')]
+
+        return combined
+
+
+if __name__ == "__main__":
+    # 测试数据加载
+    print("测试本地数据加载...")
+
+    # 测试加载单个月份
+    df = load_monthly_data('/home/ctyun/xauusd_data', 2025, 8, '15min')
+    if df is not None:
+        print("\n前5条数据:")
+        print(df.head())
+        print("\n数据描述:")
+        print(df.describe())
+
+    # 测试加载日期范围
+    print("\n" + "="*60)
+    print("测试加载日期范围 2025-08-01 到 2025-08-31")
+    print("="*60)
+    df_range = load_data_range(
+        '/home/ctyun/xauusd_data',
+        '2025-08-01',
+        '2025-08-31',
+        '15min'
+    )
+    print(f"\n加载了 {len(df_range)} 条数据")

@@ -73,36 +73,37 @@ input bool   InpEnableStrategyB = true;  // 启用策略B
 //+------------------------------------------------------------------+
 //| 全局变量                                                          |
 //+------------------------------------------------------------------+
-int g_bbHandle = INVALID_HANDLE;
-int g_atrHandle = INVALID_HANDLE;
-int g_rsiHandle = INVALID_HANDLE;
-int g_emaFastHandle = INVALID_HANDLE;
-int g_emaSlowHandle = INVALID_HANDLE;
+int g_bbHandle = INVALID_HANDLE;         // 布林带指标句柄
+int g_atrHandle = INVALID_HANDLE;        // ATR指标句柄
+int g_rsiHandle = INVALID_HANDLE;        // RSI指标句柄
+int g_emaFastHandle = INVALID_HANDLE;    // EMA快线句柄
+int g_emaSlowHandle = INVALID_HANDLE;    // EMA慢线句柄
 
 // 持仓状态
-string g_currentStrategy = "";
-int g_barsHeld = 0;
-datetime g_entryTime = 0;
-double g_entryPrice = 0;
-double g_fixedStopLoss = 0;
-double g_highestSinceEntry = 0;
-double g_lowestSinceEntry = DBL_MAX;
-double g_avgATR = 0;
+string g_currentStrategy = "";           // 当前策略 "A" 或 "B"
+int g_barsHeld = 0;                      // 持仓K线数
+datetime g_entryTime = 0;                // 入场时间
+double g_entryPrice = 0;                 // 入场价格
+double g_fixedStopLoss = 0;              // 固定止损
+double g_highestSinceEntry = 0;          // 入场后最高价
+double g_lowestSinceEntry = DBL_MAX;     // 入场后最低价
+double g_avgATR = 0;                     // 入场时平均ATR (用于动态时间止损)
 
-// VWAP 缓存
+// VWAP 缓存 (优化性能)
 double g_cachedVWAP = 0;
 datetime g_vwapLastUpdate = 0;
 
-// 策略B待确认状态
+// 策略B待确认状态 (Tick级挂单入场)
 bool g_pendingConfirmation = false;
-int g_pendingDirection = 0;
-double g_pendingBreakoutHigh = 0;
-double g_pendingBreakoutLow = 0;
+int g_pendingDirection = 0;               // 1=多, -1=空
+double g_pendingBreakoutHigh = 0;        // 突破K线最高价 (挂单触发价)
+double g_pendingBreakoutLow = 0;         // 突破K线最低价 (挂单触发价)
 double g_pendingBBUpper = 0;
 double g_pendingBBLower = 0;
 double g_pendingATR = 0;
 double g_pendingPrevLow = 0;
 double g_pendingPrevHigh = 0;
+double g_pendingEMADiff = 0;
 int g_confirmationBarsLeft = 0;
 
 //+------------------------------------------------------------------+
@@ -119,6 +120,7 @@ int OnInit()
       return(INIT_FAILED);
    }
 
+   LoadPositionState();
    Print("=== 初始化完成 ===");
    return(INIT_SUCCEEDED);
 }
@@ -173,6 +175,7 @@ void ReleaseIndicators()
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // 检查新K线形成
    static datetime lastBarTime = 0;
    datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
    bool newBar = (currentBarTime != lastBarTime);
@@ -191,6 +194,7 @@ void OnTick()
    double kcUpper, kcMiddle, kcLower;
    CalculateKeltnerChannel(kcUpper, kcMiddle, kcLower, atr[0]);
 
+   // 获取当前价格
    double close = iClose(NULL, PERIOD_M15, 0);
    double high = iHigh(NULL, PERIOD_M15, 0);
    double low = iLow(NULL, PERIOD_M15, 0);
@@ -198,23 +202,28 @@ void OnTick()
    bool isAsian = IsAsianSession();
    bool isEuropean = IsEuropeanSession();
 
+   // 计算波动率指标
    double squeezeRatio = CalculateSqueezeRatio(bbUpper[0], bbLower[0], bbMiddle[0], kcUpper, kcLower);
    bool isTrend = (squeezeRatio >= InpSqueezeThreshold);
    bool squeezeRelease = CheckSqueezeRelease(bbUpper, bbLower, kcUpper, kcLower);
 
+   // 获取VWAP (简化计算)
    double vwap = GetVWAP();
 
    // ═══════════════════════════════════════════════════════════════════
-   // 【关键】持仓出场检查 - 每Tick实时执行 (移出 newBar 限制)
+   // 【Task 1.1】持仓出场检查 - 每Tick实时执行 (移出 newBar 限制)
+   // 与Python Tick引擎对齐: 止损/追踪止损/止盈必须实时检查
    // ═══════════════════════════════════════════════════════════════════
    if(PositionSelect(Symbol()))
    {
-      g_highestSinceEntry = MathMax(g_highestSinceEntry, high);
-      g_lowestSinceEntry = MathMin(g_lowestSinceEntry, low);
+      // 更新持仓统计 (每Tick更新最高最低价)
+      UpdatePositionStats(high, low);
 
-      // 【关键修复】出场检查每Tick执行，使用当前实时ATR
+      // 【关键修复】出场检查移出 newBar 限制，每Tick执行
+      // 使用当前实时 atr[0] 计算
       CheckExitConditions(close, Bid, Ask, atr[0], vwap);
 
+      // 只在新K线时更新持仓K线数
       if(newBar)
       {
          g_barsHeld++;
@@ -222,42 +231,32 @@ void OnTick()
    }
    else
    {
+      // 没有持仓，重置状态
       if(g_currentStrategy != "")
       {
          ResetPositionState();
       }
 
       // ═════════════════════════════════════════════════════════════════
-      // 【关键】策略B挂单级入场 - 每Tick检测价格突破
+      // 【Task 1.3】策略B挂单级入场 - 每Tick检测价格突破
+      // 与Python Tick引擎对齐: Ask >= breakout_high 时立即入场
       // ═════════════════════════════════════════════════════════════════
       if(g_pendingConfirmation)
       {
-         // 多头: Ask突破高点入场
-         if(g_pendingDirection == 1 && Ask >= g_pendingBreakoutHigh)
-         {
-            double sl = MathMax(g_pendingBreakoutHigh - InpSLATRMultB * g_pendingATR, g_pendingPrevLow);
-            g_avgATR = CalculateAverageATR();
-            OpenPositionWithPrice(ORDER_TYPE_BUY, g_pendingBreakoutHigh, sl, 0, "B");
-            ResetPullbackState();
-         }
-         // 空头: Bid跌破低点入场
-         else if(g_pendingDirection == -1 && Bid <= g_pendingBreakoutLow)
-         {
-            double sl = MathMin(g_pendingBreakoutLow + InpSLATRMultB * g_pendingATR, g_pendingPrevHigh);
-            g_avgATR = CalculateAverageATR();
-            OpenPositionWithPrice(ORDER_TYPE_SELL, g_pendingBreakoutLow, sl, 0, "B");
-            ResetPullbackState();
-         }
+         // 【关键修复】每Tick检测，不等待 newBar
+         CheckPendingEntryEveryTick(atr[0]);
       }
 
-      // 入场信号检查 (只在 newBar)
+      // 入场信号检查 (只在 newBar 时检测新信号)
       if(newBar)
       {
+         // 策略A检查 - 均值回归
          if(InpEnableStrategyA && isAsian && !g_pendingConfirmation)
          {
             CheckStrategyAEntry(close, bbUpper[0], bbLower[0], rsi[0], atr[0], high, low);
          }
 
+         // 策略B检查 - 动量突破 (设置待确认状态)
          if(InpEnableStrategyB && isEuropean && !g_pendingConfirmation)
          {
             CheckStrategyBEntry(close, bbUpper[0], bbLower[0], bbMiddle[0],
@@ -271,110 +270,51 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| 出场条件检查 (每Tick执行)                                         |
-//| 【关键】追踪止损使用当前实时ATR                                    |
+//| 【Task 1.3】每Tick检测策略B挂单入场                               |
+//| 与Python Tick引擎对齐: 价格突破时立即执行                         |
 //+------------------------------------------------------------------+
-void CheckExitConditions(double close, double tickBid, double tickAsk, double currentATR, double vwap)
+void CheckPendingEntryEveryTick(double currentATR)
 {
-   if(!PositionSelect(Symbol())) return;
+   if(!g_pendingConfirmation) return;
 
-   long posType = PositionGetInteger(POSITION_TYPE);
-   double sl = PositionGetDouble(POSITION_SL);
-
-   bool shouldClose = false;
-   string reason = "";
-
-   // 策略A出场
-   if(g_currentStrategy == "A")
+   // 多头挂单: Ask >= 突破高点时入场
+   if(g_pendingDirection == 1)
    {
-      if(posType == POSITION_TYPE_BUY)
+      // 【关键对齐】Python: tick_ask >= breakout_high 时入场
+      if(Ask >= g_pendingBreakoutHigh)
       {
-         if(tickBid <= sl)
-         {
-            shouldClose = true;
-            reason = "止损";
-         }
-         else if(tickAsk >= vwap)
-         {
-            shouldClose = true;
-            reason = "VWAP止盈";
-         }
-      }
-      else if(posType == POSITION_TYPE_SELL)
-      {
-         if(tickAsk >= sl)
-         {
-            shouldClose = true;
-            reason = "止损";
-         }
-         else if(tickBid <= vwap)
-         {
-            shouldClose = true;
-            reason = "VWAP止盈";
-         }
-      }
+         Print("【Tick级入场】多头触发: Ask=", Ask, " >= BreakoutHigh=", g_pendingBreakoutHigh);
 
-      // ATR自适应动态时间止损
-      if(!shouldClose)
+         double sl = MathMax(g_pendingBreakoutHigh - InpSLATRMultB * g_pendingATR, g_pendingPrevLow);
+         g_avgATR = CalculateAverageATR();
+
+         OpenPositionWithPrice(ORDER_TYPE_BUY, g_pendingBreakoutHigh, sl, 0, "B");
+         ResetPullbackState();
+         return;
+      }
+   }
+   // 空头挂单: Bid <= 突破低点时入场
+   else if(g_pendingDirection == -1)
+   {
+      // 【关键对齐】Python: tick_bid <= breakout_low 时入场
+      if(Bid <= g_pendingBreakoutLow)
       {
-         int dynamicMaxBars = CalculateDynamicTimeStop(atr[0], g_avgATR);
-         if(g_barsHeld >= dynamicMaxBars)
-         {
-            shouldClose = true;
-            reason = "ATR动态时间止损";
-         }
+         Print("【Tick级入场】空头触发: Bid=", Bid, " <= BreakoutLow=", g_pendingBreakoutLow);
+
+         double sl = MathMin(g_pendingBreakoutLow + InpSLATRMultB * g_pendingATR, g_pendingPrevHigh);
+         g_avgATR = CalculateAverageATR();
+
+         OpenPositionWithPrice(ORDER_TYPE_SELL, g_pendingBreakoutLow, sl, 0, "B");
+         ResetPullbackState();
+         return;
       }
    }
 
-   // 策略B出场
-   if(g_currentStrategy == "B")
-   {
-      if(posType == POSITION_TYPE_BUY)
-      {
-         if(tickBid <= sl)
-         {
-            shouldClose = true;
-            reason = "初始止损";
-         }
-         // 【关键】追踪止损使用当前实时ATR
-         else
-         {
-            double trailingStop = g_highestSinceEntry - InpTrailingATRMult * currentATR;
-            if(tickBid <= trailingStop && g_highestSinceEntry > g_entryPrice)
-            {
-               shouldClose = true;
-               reason = "追踪止损";
-            }
-         }
-      }
-      else if(posType == POSITION_TYPE_SELL)
-      {
-         if(tickAsk >= sl)
-         {
-            shouldClose = true;
-            reason = "初始止损";
-         }
-         // 【关键】追踪止损使用当前实时ATR
-         else
-         {
-            double trailingStop = g_lowestSinceEntry + InpTrailingATRMult * currentATR;
-            if(tickAsk >= trailingStop && g_lowestSinceEntry < g_entryPrice)
-            {
-               shouldClose = true;
-               reason = "追踪止损";
-            }
-         }
-      }
-   }
-
-   if(shouldClose)
-   {
-      ClosePosition(reason);
-   }
+   // 超时检查 (在 newBar 时由调用方处理)
 }
 
 //+------------------------------------------------------------------+
-//| 辅助函数                                                          |
+//| 计算肯特纳通道                                                    |
 //+------------------------------------------------------------------+
 void CalculateKeltnerChannel(double &upper, double &middle, double &lower, double atr)
 {
@@ -383,7 +323,11 @@ void CalculateKeltnerChannel(double &upper, double &middle, double &lower, doubl
    lower = middle - InpKCATRMult * atr;
 }
 
-double CalculateSqueezeRatio(double bbUpper, double bbLower, double bbMiddle, double kcUpper, double kcLower)
+//+------------------------------------------------------------------+
+//| 计算波动率挤压比率                                                |
+//+------------------------------------------------------------------+
+double CalculateSqueezeRatio(double bbUpper, double bbLower, double bbMiddle,
+                              double kcUpper, double kcLower)
 {
    if(bbMiddle == 0) return 0;
    double bbWidth = (bbUpper - bbLower) / bbMiddle;
@@ -392,7 +336,11 @@ double CalculateSqueezeRatio(double bbUpper, double bbLower, double bbMiddle, do
    return bbWidth / kcWidth;
 }
 
-bool CheckSqueezeRelease(double &bbUpper[], double &bbLower[], double kcUpper, double kcLower)
+//+------------------------------------------------------------------+
+//| 检查波动率挤压释放                                                |
+//+------------------------------------------------------------------+
+bool CheckSqueezeRelease(double &bbUpper[], double &bbLower[],
+                         double kcUpper, double kcLower)
 {
    double bbUpperPrev[], bbLowerPrev[];
    if(CopyBuffer(g_bbHandle, UPPER_BAND, 1, 1, bbUpperPrev) < 1) return false;
@@ -400,26 +348,38 @@ bool CheckSqueezeRelease(double &bbUpper[], double &bbLower[], double kcUpper, d
 
    bool releaseUp = (bbUpper[0] > kcUpper) && (bbUpperPrev[0] <= kcUpper);
    bool releaseDown = (bbLower[0] < kcLower) && (bbLowerPrev[0] >= kcLower);
+
    return releaseUp || releaseDown;
 }
 
+//+------------------------------------------------------------------+
+//| 检查异常波动                                                      |
+//+------------------------------------------------------------------+
 bool CheckAbnormalVolatility(double currentHigh, double currentLow, double atr)
 {
    double currentRange = currentHigh - currentLow;
    double avgATR = CalculateAverageATR();
+
    if(avgATR > 0 && currentRange > avgATR * InpVolatilityFilterMult)
       return true;
+
    return false;
 }
 
+//+------------------------------------------------------------------+
+//| 【Task 1.4】简化VWAP计算                                          |
+//| 使用缓存避免每Tick循环100次                                       |
+//+------------------------------------------------------------------+
 double GetVWAP()
 {
+   // 每根K线只计算一次
    datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
    if(currentBarTime == g_vwapLastUpdate)
       return g_cachedVWAP;
 
    g_vwapLastUpdate = currentBarTime;
 
+   // 简化计算: 使用最近20根K线
    double cumulativeTPV = 0;
    double cumulativeVol = 0;
    int lookback = MathMin(20, iBars(NULL, PERIOD_M15));
@@ -430,6 +390,7 @@ double GetVWAP()
       double l = iLow(NULL, PERIOD_M15, i);
       double c = iClose(NULL, PERIOD_M15, i);
       double vol = (double)iVolume(NULL, PERIOD_M15, i);
+
       cumulativeTPV += (h + l + c) / 3.0 * vol;
       cumulativeVol += vol;
    }
@@ -438,18 +399,27 @@ double GetVWAP()
    return g_cachedVWAP;
 }
 
+//+------------------------------------------------------------------+
+//| 计算ATR动态时间止损                                               |
+//+------------------------------------------------------------------+
 int CalculateDynamicTimeStop(double entryATR, double avgATR)
 {
    int baseBars = (int)InpATRTimeStopBase;
    if(avgATR <= 0) return baseBars;
+
    double atrRatio = entryATR / avgATR;
    int adjustment = (int)((atrRatio - 1.0) * InpATRTimeStopMult * baseBars);
    int dynamicBars = baseBars - adjustment;
+
    if(dynamicBars < 3) dynamicBars = 3;
    if(dynamicBars > 15) dynamicBars = 15;
+
    return dynamicBars;
 }
 
+//+------------------------------------------------------------------+
+//| 计算平均ATR                                                       |
+//+------------------------------------------------------------------+
 double CalculateAverageATR()
 {
    double sum = 0;
@@ -462,6 +432,9 @@ double CalculateAverageATR()
    return (count > 0) ? sum / count : 0;
 }
 
+//+------------------------------------------------------------------+
+//| 检查是否为亚盘时段                                                |
+//+------------------------------------------------------------------+
 bool IsAsianSession()
 {
    MqlDateTime dt;
@@ -469,6 +442,9 @@ bool IsAsianSession()
    return (dt.hour >= InpAsianStart && dt.hour < InpAsianEnd);
 }
 
+//+------------------------------------------------------------------+
+//| 检查是否为欧美盘时段                                              |
+//+------------------------------------------------------------------+
 bool IsEuropeanSession()
 {
    MqlDateTime dt;
@@ -482,23 +458,39 @@ bool IsEuropeanSession()
 //+------------------------------------------------------------------+
 //| 策略A入场检查                                                     |
 //+------------------------------------------------------------------+
-void CheckStrategyAEntry(double close, double bbUpper, double bbLower, double rsi, double atr, double high, double low)
+void CheckStrategyAEntry(double close, double bbUpper, double bbLower,
+                         double rsi, double atr, double high, double low)
 {
-   if(CheckAbnormalVolatility(high, low, atr)) return;
+   if(CheckAbnormalVolatility(high, low, atr))
+   {
+      Print("策略A: 异常波动，跳过信号");
+      return;
+   }
 
+   // 做多条件
    if(close <= bbLower && rsi < InpRSIOversold)
    {
       double slAnchor = MathMin(close, bbLower);
       double sl = slAnchor - InpSLATRMultA * atr;
+      double vwap = GetVWAP();
+
       g_avgATR = CalculateAverageATR();
-      OpenPosition(ORDER_TYPE_BUY, sl, GetVWAP(), "A");
+      Print("策略A做多: 止损锚定=", slAnchor, " 止损=", sl);
+      OpenPosition(ORDER_TYPE_BUY, sl, vwap, "A");
+      return;
    }
-   else if(close >= bbUpper && rsi > InpRSIOverbought)
+
+   // 做空条件
+   if(close >= bbUpper && rsi > InpRSIOverbought)
    {
       double slAnchor = MathMax(close, bbUpper);
       double sl = slAnchor + InpSLATRMultA * atr;
+      double vwap = GetVWAP();
+
       g_avgATR = CalculateAverageATR();
-      OpenPosition(ORDER_TYPE_SELL, sl, GetVWAP(), "A");
+      Print("策略A做空: 止损锚定=", slAnchor, " 止损=", sl);
+      OpenPosition(ORDER_TYPE_SELL, sl, vwap, "A");
+      return;
    }
 }
 
@@ -506,23 +498,47 @@ void CheckStrategyAEntry(double close, double bbUpper, double bbLower, double rs
 //| 策略B入场检查 (设置待确认状态)                                    |
 //+------------------------------------------------------------------+
 void CheckStrategyBEntry(double close, double bbUpper, double bbLower, double bbMiddle,
-                         double kcUpper, double kcLower, double emaFast, double emaSlow,
+                         double kcUpper, double kcLower,
+                         double emaFast, double emaSlow,
                          bool isTrend, bool squeezeRelease, double atr, double high, double low)
 {
-   if(CheckAbnormalVolatility(high, low, atr)) return;
+   if(CheckAbnormalVolatility(high, low, atr))
+   {
+      Print("策略B: 异常波动，跳过信号");
+      return;
+   }
+
    if(!isTrend && !squeezeRelease) return;
 
+   // 做多条件
    if(close > bbUpper && bbUpper > kcUpper && emaFast > emaSlow)
    {
-      SetPullbackState(1, high, low, bbUpper, bbLower, atr);
+      double prevLow = iLow(NULL, PERIOD_M15, 1);
+      double prevHigh = iHigh(NULL, PERIOD_M15, 1);
+
+      SetPullbackState(1, high, low, bbUpper, bbLower, atr, prevLow, prevHigh, emaFast - emaSlow);
+      Print("策略B: 做多信号待确认, 挂单价=", high, " 等待Ask突破...");
+      return;
    }
-   else if(close < bbLower && bbLower < kcLower && emaFast < emaSlow)
+
+   // 做空条件
+   if(close < bbLower && bbLower < kcLower && emaFast < emaSlow)
    {
-      SetPullbackState(-1, high, low, bbUpper, bbLower, atr);
+      double prevLow = iLow(NULL, PERIOD_M15, 1);
+      double prevHigh = iHigh(NULL, PERIOD_M15, 1);
+
+      SetPullbackState(-1, high, low, bbUpper, bbLower, atr, prevLow, prevHigh, emaSlow - emaFast);
+      Print("策略B: 做空信号待确认, 挂单价=", low, " 等待Bid跌破...");
+      return;
    }
 }
 
-void SetPullbackState(int direction, double breakoutHigh, double breakoutLow, double bbUpper, double bbLower, double atr)
+//+------------------------------------------------------------------+
+//| 设置待确认状态                                                    |
+//+------------------------------------------------------------------+
+void SetPullbackState(int direction, double breakoutHigh, double breakoutLow,
+                      double bbUpper, double bbLower, double atr,
+                      double prevLow, double prevHigh, double emaDiff)
 {
    g_pendingConfirmation = true;
    g_confirmationBarsLeft = InpPullbackBars;
@@ -532,10 +548,14 @@ void SetPullbackState(int direction, double breakoutHigh, double breakoutLow, do
    g_pendingBBUpper = bbUpper;
    g_pendingBBLower = bbLower;
    g_pendingATR = atr;
-   g_pendingPrevLow = iLow(NULL, PERIOD_M15, 1);
-   g_pendingPrevHigh = iHigh(NULL, PERIOD_M15, 1);
+   g_pendingPrevLow = prevLow;
+   g_pendingPrevHigh = prevHigh;
+   g_pendingEMADiff = emaDiff;
 }
 
+//+------------------------------------------------------------------+
+//| 重置待确认状态                                                    |
+//+------------------------------------------------------------------+
 void ResetPullbackState()
 {
    g_pendingConfirmation = false;
@@ -548,10 +568,11 @@ void ResetPullbackState()
    g_pendingATR = 0;
    g_pendingPrevLow = 0;
    g_pendingPrevHigh = 0;
+   g_pendingEMADiff = 0;
 }
 
 //+------------------------------------------------------------------+
-//| 开仓                                                              |
+//| 开仓 (市价)                                                       |
 //+------------------------------------------------------------------+
 bool OpenPosition(ENUM_ORDER_TYPE orderType, double sl, double tp, string strategy)
 {
@@ -560,6 +581,9 @@ bool OpenPosition(ENUM_ORDER_TYPE orderType, double sl, double tp, string strate
    return OpenPositionWithPrice(orderType, price, sl, tp, strategy);
 }
 
+//+------------------------------------------------------------------+
+//| 开仓 (指定价格)                                                   |
+//+------------------------------------------------------------------+
 bool OpenPositionWithPrice(ENUM_ORDER_TYPE orderType, double price, double sl, double tp, string strategy)
 {
    if(PositionSelect(Symbol())) return false;
@@ -598,11 +622,145 @@ bool OpenPositionWithPrice(ENUM_ORDER_TYPE orderType, double price, double sl, d
       g_barsHeld = 0;
       g_highestSinceEntry = price;
       g_lowestSinceEntry = price;
-      Print("开仓成功: 策略", strategy, " 价格:", price, " 止损:", sl);
+
+      double atr[];
+      if(CopyBuffer(g_atrHandle, 0, 0, 1, atr) > 0)
+         ; // 不再保存 g_entryATR
+
+      Print("开仓成功: ", (orderType == ORDER_TYPE_BUY ? "做多" : "做空"),
+            " 策略", strategy, " 价格:", price, " 止损:", sl);
+
+      SavePositionState();
       return true;
    }
 
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| 更新持仓统计                                                      |
+//+------------------------------------------------------------------+
+void UpdatePositionStats(double high, double low)
+{
+   g_highestSinceEntry = MathMax(g_highestSinceEntry, high);
+   g_lowestSinceEntry = MathMin(g_lowestSinceEntry, low);
+}
+
+//+------------------------------------------------------------------+
+//| 【Task 1.1 & 1.2】出场条件检查 (每Tick执行)                       |
+//| 关键修复: 追踪止损使用当前实时ATR                                 |
+//+------------------------------------------------------------------+
+void CheckExitConditions(double close, double tickBid, double tickAsk, double currentATR, double vwap)
+{
+   if(!PositionSelect(Symbol())) return;
+
+   long posType = PositionGetInteger(POSITION_TYPE);
+   double sl = PositionGetDouble(POSITION_SL);
+
+   bool shouldClose = false;
+   string reason = "";
+
+   // ═══════════════════════════════════════════════════════════════════
+   // 策略A出场 (每Tick检查)
+   // ═══════════════════════════════════════════════════════════════════
+   if(g_currentStrategy == "A")
+   {
+      // 止损检查 (使用实际Tick价格)
+      if(posType == POSITION_TYPE_BUY)
+      {
+         // 【与Python对齐】多头止损: tick_bid <= stop_loss
+         if(tickBid <= sl)
+         {
+            shouldClose = true;
+            reason = "止损";
+         }
+         // VWAP止盈 (使用Tick价格)
+         else if(tickAsk >= vwap)
+         {
+            shouldClose = true;
+            reason = "VWAP止盈";
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         // 【与Python对齐】空头止损: tick_ask >= stop_loss
+         if(tickAsk >= sl)
+         {
+            shouldClose = true;
+            reason = "止损";
+         }
+         // VWAP止盈
+         else if(tickBid <= vwap)
+         {
+            shouldClose = true;
+            reason = "VWAP止盈";
+         }
+      }
+
+      // ATR自适应动态时间止损
+      if(!shouldClose)
+      {
+         double entryATR = iATR(NULL, PERIOD_M15, InpATRPeriod, g_barsHeld + 1);
+         int dynamicMaxBars = CalculateDynamicTimeStop(entryATR, g_avgATR);
+         if(g_barsHeld >= dynamicMaxBars)
+         {
+            shouldClose = true;
+            reason = "ATR动态时间止损";
+         }
+      }
+   }
+
+   // ═══════════════════════════════════════════════════════════════════
+   // 策略B出场 (每Tick检查)
+   // ═══════════════════════════════════════════════════════════════════
+   if(g_currentStrategy == "B")
+   {
+      if(posType == POSITION_TYPE_BUY)
+      {
+         // 初始止损
+         if(tickBid <= sl)
+         {
+            shouldClose = true;
+            reason = "初始止损";
+         }
+         // 【Task 1.2 关键修复】追踪止损使用当前实时ATR
+         // 与Python对齐: trailing_stop = highest_price - mult * current_atr
+         else
+         {
+            double trailingStop = g_highestSinceEntry - InpTrailingATRMult * currentATR;
+            if(tickBid <= trailingStop && g_highestSinceEntry > g_entryPrice)
+            {
+               shouldClose = true;
+               reason = "追踪止损";
+            }
+         }
+      }
+      else if(posType == POSITION_TYPE_SELL)
+      {
+         // 初始止损
+         if(tickAsk >= sl)
+         {
+            shouldClose = true;
+            reason = "初始止损";
+         }
+         // 【Task 1.2 关键修复】追踪止损使用当前实时ATR
+         else
+         {
+            double trailingStop = g_lowestSinceEntry + InpTrailingATRMult * currentATR;
+            if(tickAsk >= trailingStop && g_lowestSinceEntry < g_entryPrice)
+            {
+               shouldClose = true;
+               reason = "追踪止损";
+            }
+         }
+      }
+   }
+
+   // 执行平仓
+   if(shouldClose)
+   {
+      ClosePosition(reason);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -643,6 +801,9 @@ bool ClosePosition(string reason)
    return false;
 }
 
+//+------------------------------------------------------------------+
+//| 重置持仓状态                                                      |
+//+------------------------------------------------------------------+
 void ResetPositionState()
 {
    g_currentStrategy = "";
@@ -652,5 +813,53 @@ void ResetPositionState()
    g_fixedStopLoss = 0;
    g_highestSinceEntry = 0;
    g_lowestSinceEntry = DBL_MAX;
+   SavePositionState();
+}
+
+//+------------------------------------------------------------------+
+//| 保存持仓状态到文件                                                |
+//+------------------------------------------------------------------+
+void SavePositionState()
+{
+   string filename = "XAUUSD_DualStrategy_State.bin";
+   int handle = FileOpen(filename, FILE_WRITE|FILE_BIN|FILE_COMMON);
+
+   if(handle != INVALID_HANDLE)
+   {
+      FileWriteString(handle, g_currentStrategy, 10);
+      FileWriteInteger(handle, g_barsHeld);
+      FileWriteLong(handle, g_entryTime);
+      FileWriteDouble(handle, g_entryPrice);
+      FileWriteDouble(handle, g_fixedStopLoss);
+      FileWriteDouble(handle, g_highestSinceEntry);
+      FileWriteDouble(handle, g_lowestSinceEntry);
+      FileClose(handle);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 从文件加载持仓状态                                                |
+//+------------------------------------------------------------------+
+void LoadPositionState()
+{
+   string filename = "XAUUSD_DualStrategy_State.bin";
+   int handle = FileOpen(filename, FILE_READ|FILE_BIN|FILE_COMMON);
+
+   if(handle != INVALID_HANDLE)
+   {
+      if(FileSize(handle) > 0)
+      {
+         g_currentStrategy = FileReadString(handle, 10);
+         g_barsHeld = FileReadInteger(handle);
+         g_entryTime = FileReadLong(handle);
+         g_entryPrice = FileReadDouble(handle);
+         g_fixedStopLoss = FileReadDouble(handle);
+         g_highestSinceEntry = FileReadDouble(handle);
+         g_lowestSinceEntry = FileReadDouble(handle);
+
+         Print("加载持仓状态: 策略", g_currentStrategy);
+      }
+      FileClose(handle);
+   }
 }
 //+------------------------------------------------------------------+

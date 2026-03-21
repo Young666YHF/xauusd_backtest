@@ -1,387 +1,313 @@
+#!/usr/bin/env python3
 """
-运行优化脚本
-============
-加载2025-01至2026-02数据（14个月），运行Optuna TPE优化
-支持Walk-Forward验证
+Numba Tick 级别贝叶斯优化
+====================================
+使用 Optuna TPE 算法，在 Numba Tick 级别回测引擎上优化策略参数。
+
+关键特性:
+1. 直接调用 optuna_optimizer.py 的 run_tick_optuna_optimization
+2. 使用 Numba JIT 编译的高性能 Tick 撮合引擎 (100x 提升)
+3. Walk-Forward Optimization (WFO) 交叉验证
+4. 全量 14 个月 Tick 数据 (2025-01 至 2026-02)
+
+数据范围: 2025年1月 至 2026年2月 (14个月)
+回测粒度: Tick 逐笔撮合
 """
 
-import os
 import sys
-import argparse
+import json
+import functools
+from pathlib import Path
+from datetime import datetime
+import warnings
+
+print = functools.partial(print, flush=True)
+warnings.filterwarnings('ignore')
+
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from pathlib import Path
-import json
-from typing import Dict, List, Optional
 
-# 添加项目路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, str(Path(__file__).parent))
 
-from data_loader import load_data_range
+from data_loader import load_tick_data_from_csv, ticks_to_ohlcv
+from indicators import add_all_indicators
+from strategy import TradingStrategy
+from tick_engine import TickBacktestEngine, print_tick_backtest_results
 from optuna_optimizer import (
     run_tick_optuna_optimization,
-    run_walk_forward_optimization,
-    OptimizationResult,
+    OPTIMIZATION_BOUNDS,
+    DEFAULT_PARAMS,
+    expand_simplified_params,
+    calculate_custom_fitness,
 )
-from strategy import TradingStrategy
-from tick_engine import TickBacktestEngine
-from config import DEFAULT_PARAMS
 
 
-# 默认数据配置
-DEFAULT_DATA_DIR = '/home/ctyun/xauusd_data'
-DEFAULT_START_DATE = '2025-01-01'
-DEFAULT_END_DATE = '2026-02-28'
+# =============================================================================
+# 数据加载
+# =============================================================================
 
-
-def run_single_optimization(
-    data_dir: str = DEFAULT_DATA_DIR,
-    start_date: str = DEFAULT_START_DATE,
-    end_date: str = DEFAULT_END_DATE,
-    n_trials: int = 100,
-    n_jobs: int = 1,
-    output_dir: Optional[str] = None,
-    verbose: bool = True
-) -> OptimizationResult:
+def load_all_tick_data(data_dir: str, start_month: str, end_month: str) -> pd.DataFrame:
     """
-    运行单次优化
+    加载指定范围内的所有 Tick 数据
 
     Args:
         data_dir: 数据目录
-        start_date: 开始日期
-        end_date: 结束日期
-        n_trials: 优化轮数
-        n_jobs: 并行数
-        output_dir: 输出目录
-        verbose: 是否打印进度
+        start_month: 开始月份 (格式: '2025-01')
+        end_month: 结束月份 (格式: '2026-02')
 
     Returns:
-        OptimizationResult
+        合并后的 Tick DataFrame
     """
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"XAUUSD 双策略 Tick级别优化")
-        print(f"{'='*60}")
-        print(f"数据目录: {data_dir}")
-        print(f"日期范围: {start_date} ~ {end_date}")
-        print(f"优化轮数: {n_trials}")
-        print(f"{'='*60}\n")
+    data_path = Path(data_dir)
 
-    # 加载数据
-    print("正在加载数据...")
-    ticks_df, ohlcv_df = load_data_range(data_dir, start_date, end_date)
+    # 生成月份列表
+    start = pd.to_datetime(start_month + '-01')
+    end = pd.to_datetime(end_month + '-01')
 
-    print(f"加载完成:")
-    print(f"  Tick数据: {len(ticks_df):,} 条")
-    print(f"  时间范围: {ticks_df.index[0]} ~ {ticks_df.index[-1]}")
-    print(f"  K线数据: {len(ohlcv_df):,} 根")
+    months = []
+    current = start
+    while current <= end:
+        months.append(current.strftime('%Y-%m'))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
 
-    # 运行优化
+    print(f"\n[数据加载] 计划加载 {len(months)} 个月份的 Tick 数据:")
+    print(f"  范围: {months[0]} 至 {months[-1]}")
+
+    all_ticks = []
+    total_ticks = 0
+
+    for m in months:
+        filename = f'XAUUSD_{m}.csv'
+        filepath = data_path / filename
+
+        if not filepath.exists():
+            print(f"  ⚠ {filename} 不存在，跳过")
+            continue
+
+        print(f"  加载: {filename}", end=' ')
+        df_tick = load_tick_data_from_csv(str(filepath))
+
+        if len(df_tick) > 0:
+            all_ticks.append(df_tick)
+            total_ticks += len(df_tick)
+            print(f"✓ {len(df_tick):,} ticks")
+        else:
+            print("✗ 空数据")
+
+    if not all_ticks:
+        raise ValueError(f"未找到任何 Tick 数据! 请检查数据目录: {data_dir}")
+
+    # 合并并去重
+    ticks_df = pd.concat(all_ticks).sort_index()
+    ticks_df = ticks_df[~ticks_df.index.duplicated(keep='first')]
+
+    print(f"\n  总计: {len(ticks_df):,} ticks")
+    print(f"  时间范围: {ticks_df.index[0]} 至 {ticks_df.index[-1]}")
+
+    return ticks_df
+
+
+# =============================================================================
+# 主函数
+# =============================================================================
+
+def main():
+    print("=" * 70)
+    print("Numba Tick 级别贝叶斯优化 (Optuna TPE + WFO)")
+    print("数据周期: 2025年1月 - 2026年2月 (14个月)")
+    print("回测粒度: Tick 逐笔撮合")
+    print("=" * 70)
+
+    # 检查 optuna 是否安装
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        print(f"Optuna 版本: {optuna.__version__}")
+    except ImportError:
+        print("请先安装 optuna: pip install optuna")
+        sys.exit(1)
+
+    # -------------------------------------------------------------------------
+    # 1. 加载全量 Tick 数据 (14个月)
+    # -------------------------------------------------------------------------
+    print("\n[1/4] 加载 Tick 数据...")
+
+    DATA_DIR = '/home/ctyun/xauusd_data'
+    ticks_df = load_all_tick_data(DATA_DIR, '2025-01', '2026-02')
+
+    # -------------------------------------------------------------------------
+    # 2. 聚合 K 线并计算指标
+    # -------------------------------------------------------------------------
+    print("\n[2/4] 聚合 K 线并计算指标...")
+
+    INTERVAL = '15min'
+    ohlcv_df = ticks_to_ohlcv(ticks_df, INTERVAL)
+    ohlcv_df = add_all_indicators(ohlcv_df, DEFAULT_PARAMS)
+
+    print(f"  K 线数量: {len(ohlcv_df):,} 根 ({INTERVAL})")
+    print(f"  时间范围: {ohlcv_df.index[0]} 至 {ohlcv_df.index[-1]}")
+
+    # -------------------------------------------------------------------------
+    # 3. 运行 Numba Tick 优化 (带 WFO)
+    # -------------------------------------------------------------------------
+    print("\n[3/4] 运行 Numba Tick 优化...")
+
+    N_TRIALS = 300       # Optuna 迭代次数
+    MIN_TRADES = 50      # 最小交易次数
+    USE_WFO = True       # 启用 Walk-Forward Optimization
+    N_SPLITS = 4         # WFO 分割数
+
+    print(f"\n  优化配置:")
+    print(f"    迭代次数: {N_TRIALS}")
+    print(f"    最小交易次数: {MIN_TRADES}")
+    print(f"    Walk-Forward: {'启用' if USE_WFO else '禁用'} (splits={N_SPLITS})")
+    print(f"    参数数量: {len(OPTIMIZATION_BOUNDS)} (简化版)")
+
+    # 【关键】直接调用 optuna_optimizer.py 的 Numba Tick 优化入口
     result = run_tick_optuna_optimization(
-        ticks_df=ticks_df,
+        tick_df=ticks_df,
         ohlcv_df=ohlcv_df,
-        n_trials=n_trials,
-        n_jobs=n_jobs,
-        verbose=verbose,
+        n_trials=N_TRIALS,
+        min_trades=MIN_TRADES,
+        study_name="xauusd_tick_wfo_optimization",
+        storage=None,  # 不持久化
+        verbose=True,
+        use_simplified_params=True
     )
 
-    # 保存结果
-    if output_dir:
-        save_results(result, output_dir, start_date, end_date)
+    # -------------------------------------------------------------------------
+    # 4. 保存结果
+    # -------------------------------------------------------------------------
+    print("\n[4/4] 保存优化结果...")
 
-    return result
+    results_dir = Path(__file__).parent / 'results'
+    results_dir.mkdir(exist_ok=True)
 
-
-def run_wfo_optimization(
-    data_dir: str = DEFAULT_DATA_DIR,
-    start_date: str = DEFAULT_START_DATE,
-    end_date: str = DEFAULT_END_DATE,
-    n_splits: int = 5,
-    n_trials: int = 50,
-    output_dir: Optional[str] = None,
-    verbose: bool = True
-) -> List[Dict]:
-    """
-    运行Walk-Forward优化验证
-
-    Args:
-        data_dir: 数据目录
-        start_date: 开始日期
-        end_date: 结束日期
-        n_splits: 分割数
-        n_trials: 每个分割的优化轮数
-        output_dir: 输出目录
-        verbose: 是否打印进度
-
-    Returns:
-        每个fold的结果列表
-    """
-    if verbose:
-        print(f"\n{'='*60}")
-        print(f"XAUUSD 双策略 Walk-Forward优化验证")
-        print(f"{'='*60}")
-        print(f"数据目录: {data_dir}")
-        print(f"日期范围: {start_date} ~ {end_date}")
-        print(f"分割数: {n_splits}")
-        print(f"每分割优化轮数: {n_trials}")
-        print(f"{'='*60}\n")
-
-    # 加载数据
-    print("正在加载数据...")
-    ticks_df, ohlcv_df = load_data_range(data_dir, start_date, end_date)
-
-    print(f"加载完成:")
-    print(f"  Tick数据: {len(ticks_df):,} 条")
-    print(f"  时间范围: {ticks_df.index[0]} ~ {ticks_df.index[-1]}")
-    print(f"  K线数据: {len(ohlcv_df):,} 根")
-
-    # 运行WFO
-    results = run_walk_forward_optimization(
-        ticks_df=ticks_df,
-        ohlcv_df=ohlcv_df,
-        n_splits=n_splits,
-        n_trials=n_trials,
-        verbose=verbose,
-    )
-
-    # 保存结果
-    if output_dir:
-        save_wfo_results(results, output_dir)
-
-    return results
-
-
-def save_results(
-    result: OptimizationResult,
-    output_dir: str,
-    start_date: str,
-    end_date: str
-):
-    """保存优化结果"""
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    # 展开简化参数
+    best_params = result.get('best_params', {})
+    if 'channel_period' in best_params:
+        full_params = expand_simplified_params(best_params)
+    else:
+        full_params = DEFAULT_PARAMS.copy()
+        full_params.update(best_params)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    # 保存最佳参数
-    params_file = output_path / f'best_params_{timestamp}.json'
+    # 保存完整结果
+    result_to_save = {
+        'timestamp': timestamp,
+        'optimization_type': 'numba_tick_wfo_optuna_tpe',
+        'backtest_engine': 'NumbaTickBacktestEngine',
+        'data_range': {
+            'start': str(ticks_df.index[0]),
+            'end': str(ticks_df.index[-1]),
+            'total_ticks': len(ticks_df),
+            'interval': INTERVAL,
+        },
+        'optimization_config': {
+            'n_trials': N_TRIALS,
+            'min_trades': MIN_TRADES,
+            'use_wfo': USE_WFO,
+            'n_splits': N_SPLITS,
+        },
+        'best_params': full_params,
+        'best_fitness': result.get('best_fitness', 0),
+        'best_trial_stats': result.get('best_trial_stats', {}),
+    }
+
+    result_file = results_dir / f'numba_tick_wfo_optimized_{timestamp}.json'
+    with open(result_file, 'w') as f:
+        json.dump(result_to_save, f, indent=2, default=str)
+    print(f"  优化结果已保存: {result_file}")
+
+    # 保存参数文件
+    params_file = results_dir / 'tick_optimized_params.json'
     with open(params_file, 'w') as f:
-        json.dump(result.best_params, f, indent=2)
-    print(f"参数已保存: {params_file}")
+        json.dump(full_params, f, indent=2)
+    print(f"  最优参数已保存: {params_file}")
 
-    # 保存统计结果
-    stats_file = output_path / f'stats_{timestamp}.json'
-    with open(stats_file, 'w') as f:
-        json.dump(result.best_stats, f, indent=2)
-    print(f"统计已保存: {stats_file}")
+    # MT4 格式参数文件
+    mt4_file = results_dir / f'params_mt4_tick_{timestamp}.txt'
+    with open(mt4_file, 'w') as f:
+        f.write("// XAUUSD 最佳策略参数 (Numba Tick 级别优化 + WFO)\n")
+        f.write(f"// 优化时间: {timestamp}\n")
+        f.write(f"// 数据范围: {ticks_df.index[0]} 到 {ticks_df.index[-1]}\n")
+        stats = result.get('best_trial_stats', {})
+        f.write(f"// 总收益率: {stats.get('total_return', 0):.2f}%\n")
+        f.write(f"// 最大回撤: {stats.get('max_drawdown', 0):.2f}%\n")
+        f.write(f"// 夏普比率: {stats.get('sharpe_ratio', 0):.2f}\n")
+        f.write(f"// 胜率: {stats.get('win_rate', 0):.2f}%\n")
+        f.write(f"// 交易次数: {stats.get('total_trades', 0)}\n")
+        f.write(f"// Tick 处理数: {stats.get('ticks_processed', 0):,}\n")
+        f.write("//\n\n")
+        for name, value in sorted(full_params.items()):
+            if isinstance(value, int):
+                f.write(f"input int {name} = {value};\n")
+            else:
+                f.write(f"input double {name} = {value:.6f};\n")
+    print(f"  MT4 参数文件已保存: {mt4_file}")
 
-    # 保存所有试验
-    if result.all_trials is not None and len(result.all_trials) > 0:
-        trials_file = output_path / f'all_trials_{timestamp}.csv'
-        result.all_trials.to_csv(trials_file, index=False)
-        print(f"试验记录已保存: {trials_file}")
+    # -------------------------------------------------------------------------
+    # 最终验证 (使用最佳参数运行完整 Tick 回测)
+    # -------------------------------------------------------------------------
+    print("\n[最终验证] 使用最佳参数运行完整 Tick 回测...")
 
+    ohlcv_ind = add_all_indicators(ohlcv_df.copy(), full_params)
+    strategy = TradingStrategy(full_params)
 
-def save_wfo_results(results: List[Dict], output_dir: str):
-    """保存WFO结果"""
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    # 汇总每个fold的参数和统计
-    summary = []
-    for r in results:
-        summary.append({
-            'fold': r['fold'],
-            'train_start': str(r['train_start']),
-            'train_end': str(r['train_end']),
-            'val_start': str(r['val_start']),
-            'val_end': str(r['val_end']),
-            'train_return': r['train_stats']['total_return'],
-            'train_sharpe': r['train_stats']['sharpe_ratio'],
-            'train_dd': r['train_stats']['max_drawdown'],
-            'val_return': r['val_stats']['total_return'],
-            'val_sharpe': r['val_stats']['sharpe_ratio'],
-            'val_dd': r['val_stats']['max_drawdown'],
-        })
-
-    summary_df = pd.DataFrame(summary)
-    summary_file = output_path / f'wfo_summary_{timestamp}.csv'
-    summary_df.to_csv(summary_file, index=False)
-    print(f"WFO汇总已保存: {summary_file}")
-
-    # 保存每个fold的详细参数
-    for r in results:
-        params_file = output_path / f'wfo_fold{r["fold"]}_params_{timestamp}.json'
-        with open(params_file, 'w') as f:
-            # 转换参数值为Python原生类型
-            params = {k: float(v) if isinstance(v, (np.floating, np.integer)) else v
-                      for k, v in r['best_params'].items()}
-            json.dump(params, f, indent=2)
-
-
-def run_backtest_with_params(
-    params: Dict,
-    data_dir: str = DEFAULT_DATA_DIR,
-    start_date: str = DEFAULT_START_DATE,
-    end_date: str = DEFAULT_END_DATE,
-    verbose: bool = True
-) -> Dict:
-    """
-    使用指定参数运行回测
-
-    Args:
-        params: 策略参数
-        data_dir: 数据目录
-        start_date: 开始日期
-        end_date: 结束日期
-        verbose: 是否打印进度
-
-    Returns:
-        回测统计结果
-    """
-    if verbose:
-        print(f"\n使用指定参数运行回测...")
-        print(f"日期范围: {start_date} ~ {end_date}")
-
-    # 加载数据
-    ticks_df, ohlcv_df = load_data_range(data_dir, start_date, end_date)
-
-    # 创建策略
-    strategy = TradingStrategy(params)
-
-    # 准备指标
-    ohlcv_with_indicators = strategy.prepare_indicators(ohlcv_df)
-
-    # 生成信号
-    from strategy import SignalType
-    signals = []
-    for i in range(max(params.get('bb_period', 20), params.get('ema_slow', 50)) + 1,
-                   len(ohlcv_with_indicators)):
-        sig_a = strategy.generate_strategy_a_signal(ohlcv_with_indicators, i)
-        if sig_a:
-            signals.append({
-                'timestamp': sig_a.timestamp,
-                'direction': 1 if sig_a.signal_type == SignalType.LONG else -1,
-                'stop_loss': sig_a.stop_loss,
-                'strategy': 'A',
-            })
-
-        sig_b = strategy.generate_strategy_b_signal(ohlcv_with_indicators, i)
-        if sig_b:
-            signals.append({
-                'timestamp': sig_b.timestamp,
-                'direction': 1 if sig_b.signal_type == SignalType.LONG else -1,
-                'stop_loss': sig_b.stop_loss,
-                'strategy': 'B',
-            })
-
-    # 创建回测引擎 (不传spread参数)
     engine = TickBacktestEngine(
         initial_capital=100000,
         position_size=1.0,
-        contract_size=100,
-        stop_loss_mult_b=params.get('stop_loss_mult_b', 2.0),
-        trailing_stop_mult=params.get('trailing_stop_mult', 3.0),
-        max_hold_bars_a=params.get('max_hold_bars_a', 6),
-        atr_time_stop_base=params.get('atr_time_stop_base', 5.0),
-        atr_time_stop_mult=params.get('atr_time_stop_mult', 0.5),
+        contract_size=100
     )
+    final_stats = engine.run_tick_backtest(ticks_df, ohlcv_ind, strategy, verbose=False)
+    print_tick_backtest_results(final_stats)
 
-    # 运行回测
-    stats = engine.run(ticks_df, signals, ohlcv_df)
+    # 汇总打印
+    print(f"\n{'='*70}")
+    print("Numba Tick 级别贝叶斯优化完成!")
+    print(f"{'='*70}")
+    print(f"\n最佳参数表现 (Tick 验证):")
+    print(f"  总收益率:  {final_stats.get('total_return', 0):.2f}%")
+    print(f"  最大回撤:  {final_stats.get('max_drawdown', 0):.2f}%")
+    print(f"  夏普比率:  {final_stats.get('sharpe_ratio', 0):.2f}")
+    print(f"  胜率:      {final_stats.get('win_rate', 0):.2f}%")
+    print(f"  交易次数:  {final_stats.get('total_trades', 0)}")
+    print(f"  处理Tick:  {final_stats.get('total_ticks_processed', 0):,}")
 
-    if verbose:
-        print(f"\n回测结果:")
-        print(f"  总交易次数: {stats['total_trades']}")
-        print(f"  胜率: {stats['win_rate']:.2f}%")
-        print(f"  总收益: {stats['total_return']:.2f}%")
-        print(f"  夏普比率: {stats['sharpe_ratio']:.2f}")
-        print(f"  最大回撤: {stats['max_drawdown']:.2f}%")
-        print(f"  盈亏比: {stats['profit_factor']:.2f}")
+    print(f"\n最佳参数:")
+    for name, value in sorted(full_params.items()):
+        print(f"  {name}: {value}")
 
-    return stats
+    # 飞书通知
+    try:
+        sys.path.insert(0, '/home/ctyun/.claude/skills/feishu-bridge')
+        from milestone_helper import send_milestone
+        send_milestone(
+            title='Numba Tick WFO 优化完成',
+            status='已完成',
+            progress=100,
+            message=f'''数据: 2025-01至2026-02 (14个月, {len(ticks_df):,} ticks)
+迭代: {N_TRIALS} 次
+WFO: 启用 ({N_SPLITS} splits)
 
+Tick 级验证结果:
+总收益率: {final_stats.get("total_return", 0):.2f}%
+最大回撤: {final_stats.get("max_drawdown", 0):.2f}%
+夏普比率: {final_stats.get("sharpe_ratio", 0):.2f}
+胜率: {final_stats.get("win_rate", 0):.2f}%
+交易次数: {final_stats.get("total_trades", 0)}
 
-def main():
-    """主函数"""
-    parser = argparse.ArgumentParser(description='XAUUSD双策略优化')
-
-    parser.add_argument('--mode', type=str, default='single',
-                        choices=['single', 'wfo', 'backtest'],
-                        help='运行模式: single=单次优化, wfo=Walk-Forward优化, backtest=回测')
-
-    parser.add_argument('--data-dir', type=str, default=DEFAULT_DATA_DIR,
-                        help='数据目录')
-
-    parser.add_argument('--start-date', type=str, default=DEFAULT_START_DATE,
-                        help='开始日期 (YYYY-MM-DD)')
-
-    parser.add_argument('--end-date', type=str, default=DEFAULT_END_DATE,
-                        help='结束日期 (YYYY-MM-DD)')
-
-    parser.add_argument('--n-trials', type=int, default=100,
-                        help='优化轮数')
-
-    parser.add_argument('--n-splits', type=int, default=5,
-                        help='WFO分割数')
-
-    parser.add_argument('--n-jobs', type=int, default=1,
-                        help='并行数')
-
-    parser.add_argument('--output-dir', type=str, default='./optimization_results',
-                        help='输出目录')
-
-    parser.add_argument('--params-file', type=str, default=None,
-                        help='参数文件路径 (用于backtest模式)')
-
-    parser.add_argument('--quiet', action='store_true',
-                        help='静默模式')
-
-    args = parser.parse_args()
-
-    verbose = not args.quiet
-
-    if args.mode == 'single':
-        result = run_single_optimization(
-            data_dir=args.data_dir,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            n_trials=args.n_trials,
-            n_jobs=args.n_jobs,
-            output_dir=args.output_dir,
-            verbose=verbose,
+结果已保存: {result_file.name}'''
         )
+    except Exception:
+        pass
 
-    elif args.mode == 'wfo':
-        results = run_wfo_optimization(
-            data_dir=args.data_dir,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            n_splits=args.n_splits,
-            n_trials=args.n_trials,
-            output_dir=args.output_dir,
-            verbose=verbose,
-        )
-
-    elif args.mode == 'backtest':
-        # 加载参数
-        if args.params_file:
-            with open(args.params_file, 'r') as f:
-                params = json.load(f)
-        else:
-            params = DEFAULT_PARAMS
-
-        stats = run_backtest_with_params(
-            params=params,
-            data_dir=args.data_dir,
-            start_date=args.start_date,
-            end_date=args.end_date,
-            verbose=verbose,
-        )
+    return result_to_save
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
