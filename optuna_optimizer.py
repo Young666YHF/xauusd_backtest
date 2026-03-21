@@ -687,7 +687,33 @@ def run_walk_forward_optimization(
         engine = BacktestEngine(initial_capital=100000)
         oos_stats = engine.run_backtest(oos_df_eval, strategy, verbose=False)
 
+        # ========== 【Critical Fix 4】蒙特卡洛防过拟合检验 ==========
+        # 在计算OOS适应度之前，必须通过蒙特卡洛噪音注入验证
+        oos_trades_df = oos_stats.get('trades_df', None)
+        mc_result = None
+        is_fragile = False
+
+        if oos_trades_df is not None and len(oos_trades_df) >= 5:
+            mc_result = run_monte_carlo_validation(
+                oos_trades_df,
+                n_simulations=100,
+                noise_ratio=0.2,
+                degradation_threshold=0.5,
+                verbose=verbose
+            )
+            is_fragile = mc_result.is_fragile
+        else:
+            # 交易次数过少，默认不进行蒙特卡洛检验
+            is_fragile = False
+
         oos_fitness = calculate_custom_fitness(oos_stats, min_trades // 2, False)
+
+        # 如果蒙特卡洛检验判定参数脆弱，严厉惩罚适应度
+        if is_fragile:
+            oos_fitness = -1000.0  # 负值惩罚
+            if verbose:
+                print(f"  【脆弱_拒绝】蒙特卡洛检验未通过！")
+                print(f"    夏普劣化: {mc_result.sharpe_degradation*100:.1f}%, Calmar劣化: {mc_result.calmar_degradation*100:.1f}%")
 
         if verbose:
             print(f"  IS Best: {study.best_value:.2f}")
@@ -695,13 +721,17 @@ def run_walk_forward_optimization(
                   f"Return={oos_stats['total_return']:.2f}%, "
                   f"DD={oos_stats['max_drawdown']:.2f}%, "
                   f"Trades={oos_stats['total_trades']}")
+            if mc_result is not None:
+                print(f"  蒙特卡洛: {'❌脆弱' if is_fragile else '✓稳健'}")
 
         all_results.append({
             'split': i + 1,
             'best_params': best_params,
             'is_fitness': study.best_value,
             'oos_stats': oos_stats,
-            'oos_fitness': oos_fitness
+            'oos_fitness': oos_fitness,
+            'mc_result': mc_result,
+            'is_fragile': is_fragile
         })
 
         oos_performances.append(oos_fitness)

@@ -5,22 +5,41 @@
 - 强制时区校验与转换
 - 确保所有数据索引为北京时间 (UTC+8)
 - 防止参数学习错配
+
+【Critical Fix 5】DST 动态时区信号生成
+- 使用 Pandas timezone 自动适应美国夏令时/冬令时切换
+- 生成 Is_Asian (06:00-14:00 北京时间) 和 Is_European (15:00-00:00 北京时间) 信号列
 """
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional
 import warnings
 
+try:
+    import pytz
+    PYTZ_AVAILABLE = True
+except ImportError:
+    PYTZ_AVAILABLE = False
+    warnings.warn("pytz 未安装，DST 功能将不可用。请运行: pip install pytz")
+
 
 # 北京时区 (UTC+8)
-BEIJING_TZ = 'Asia/Shanghai'
+BEIJING_TZ_NAME = 'Asia/Shanghai'
 UTC_TZ = 'UTC'
 
+# 使用 pytz 的时区对象
+if PYTZ_AVAILABLE:
+    BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+    NEW_YORK_TZ = pytz.timezone('America/New_York')
+else:
+    BEIJING_TZ = BEIJING_TZ_NAME
+    NEW_YORK_TZ = None
 
-def validate_and_convert_timezone(df: pd.DataFrame, expected_tz: str = BEIJING_TZ) -> pd.DataFrame:
+
+def validate_and_convert_timezone(df: pd.DataFrame, expected_tz = None) -> pd.DataFrame:
     """
     【修复2.1】时区校验与转换
 
@@ -36,6 +55,8 @@ def validate_and_convert_timezone(df: pd.DataFrame, expected_tz: str = BEIJING_T
     Raises:
         ValueError: 如果无法确定时区信息
     """
+    if expected_tz is None:
+        expected_tz = BEIJING_TZ_NAME
     if df.index.tz is None:
         # 无时区信息 - 需要推断或假设
         warnings.warn(
@@ -235,6 +256,124 @@ def load_data_range(
     print(f"价格范围: {combined['Low'].min():.2f} - {combined['High'].max():.2f}")
 
     return combined
+
+
+# =============================================================================
+# 【Critical Fix 5】DST 动态时区信号生成
+# =============================================================================
+
+
+def add_trading_session_signals(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    【Critical Fix 5】添加 DST 感知的交易时段信号列
+
+    使用 Pandas timezone 转换功能，自动适应美国夏令时/冬令时切换
+
+    交易时段定义 (北京时间):
+    - 亚盘: 06:00-14:00
+    - 欧美盘: 15:00-00:00 (次日)
+
+    Args:
+        df: OHLCV DataFrame，索引为时间戳 (需有时区信息)
+
+    Returns:
+        添加了 Is_Asian 和 Is_European 列的 DataFrame
+    """
+    if not PYTZ_AVAILABLE:
+        warnings.warn("pytz 未安装，无法进行 DST 感知的时区转换")
+        # 回退：使用简单的固定时区假设
+        df = df.copy()
+        beijing_hours = df.index.hour if df.index.tz is None else df.index.tz_convert(BEIJING_TZ_NAME).hour
+        df['Is_Asian'] = (beijing_hours >= 6) & (beijing_hours < 14)
+        df['Is_European'] = (beijing_hours >= 15) | (beijing_hours < 0)
+        return df
+
+    df = df.copy()
+
+    # 确保索引有时区信息
+    if df.index.tz is None:
+        # 假设为 UTC+0，转换为北京时间
+        df.index = df.index.tz_localize('UTC').tz_convert(BEIJING_TZ)
+    else:
+        # 转换为北京时间
+        df.index = df.index.tz_convert(BEIJING_TZ)
+
+    # 提取北京时间的小时
+    beijing_hours = df.index.hour
+
+    # 亚盘信号: 06:00-14:00 北京时间
+    df['Is_Asian'] = (beijing_hours >= 6) & (beijing_hours < 14)
+
+    # 欧美盘信号: 15:00-00:00 北京时间
+    df['Is_European'] = (beijing_hours >= 15) | (beijing_hours < 0)
+
+    # 添加美东时间列 (用于调试)
+    df['NY_Hour'] = df.index.tz_convert(NEW_YORK_TZ).hour
+
+    # 添加夏令时标记 (用于调试)
+    # 美国夏令时: 3月第二个周日 - 11月第一个周日
+    df['Is_DST'] = df.index.map(lambda x: is_us_dst(x))
+
+    return df
+
+
+def is_us_dst(dt: datetime) -> bool:
+    """
+    判断给定时间是否处于美国夏令时期间
+
+    美国夏令时规则:
+    - 开始: 3月第二个周日 2:00 AM
+    - 结束: 11月第一个周日 2:00 AM
+
+    Args:
+        dt: datetime 对象 (带时区信息)
+
+    Returns:
+        True 表示夏令时，False 表示冬令时
+    """
+    # 转换为美东时间
+    if dt.tzinfo is not None:
+        eastern_dt = dt.astimezone(NEW_YORK_TZ)
+    else:
+        # 假设为北京时间
+        eastern_dt = BEIJING_TZ.localize(dt).astimezone(NEW_YORK_TZ)
+
+    year = eastern_dt.year
+
+    # 计算3月第二个周日
+    march_first = datetime(year, 3, 1)
+    days_until_sunday = (6 - march_first.weekday()) % 7
+    first_sunday_march = march_first + timedelta(days=days_until_sunday)
+    second_sunday_march = first_sunday_march + timedelta(days=7)
+    dst_start = NEW_YORK_TZ.localize(second_sunday_march.replace(hour=2, minute=0, second=0))
+
+    # 计算11月第一个周日
+    november_first = datetime(year, 11, 1)
+    days_until_sunday = (6 - november_first.weekday()) % 7
+    first_sunday_november = november_first + timedelta(days=days_until_sunday)
+    dst_end = NEW_YORK_TZ.localize(first_sunday_november.replace(hour=2, minute=0, second=0))
+
+    # 判断是否在夏令时期间
+    return dst_start <= eastern_dt < dst_end
+
+
+def get_session_info(df: pd.DataFrame) -> dict:
+    """
+    获取交易时段统计信息
+
+    Args:
+        df: 带有交易时段信号的 DataFrame
+
+    Returns:
+        包含各时段统计的字典
+    """
+    return {
+        'total_bars': len(df),
+        'asian_bars': df['Is_Asian'].sum() if 'Is_Asian' in df.columns else 0,
+        'european_bars': df['Is_European'].sum() if 'Is_European' in df.columns else 0,
+        'dst_bars': df['Is_DST'].sum() if 'Is_DST' in df.columns else 0,
+        'date_range': f"{df.index[0]} to {df.index[-1]}" if len(df) > 0 else "N/A"
+    }
 
 
 def load_local_15min_data(

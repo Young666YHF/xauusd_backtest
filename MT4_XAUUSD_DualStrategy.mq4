@@ -317,18 +317,23 @@ void OnTick()
       // 无持仓时检查入场信号 (只在 newBar 时检测新信号)
       if(newBar)
       {
+         // 【Critical Fix 1】使用 index 1 (已收盘K线) 的价格，绝不用 index 0
+         double close1 = iClose(NULL, PERIOD_M15, 1);
+         double high1 = iHigh(NULL, PERIOD_M15, 1);
+         double low1 = iLow(NULL, PERIOD_M15, 1);
+
          // 策略A检查 - 均值回归
          if(InpEnableStrategyA && isAsian)
          {
-            CheckStrategyAEntry(close, bbUpper, bbLower, rsi, atr, high, low);
+            CheckStrategyAEntry(close1, bbUpper, bbLower, rsi, atr, high1, low1);
          }
 
          // 策略B检查 - 动量突破
          if(InpEnableStrategyB && isEuropean && g_pendingOrderTicket == 0)
          {
-            CheckStrategyBEntry(close, bbUpper, bbLower, bbMiddle,
+            CheckStrategyBEntry(close1, bbUpper, bbLower, bbMiddle,
                                kcUpper, kcLower, emaFast, emaSlow,
-                               isTrend, squeezeRelease, atr, high, low);
+                               isTrend, squeezeRelease, atr, high1, low1);
          }
       }
    }
@@ -754,6 +759,7 @@ void CheckStrategyBEntry(double close, double bbUpper, double bbLower, double bb
 
 //+------------------------------------------------------------------+
 //| 【Critical Fix 1】发送 Buy Stop 挂单                              |
+//| 【Critical Fix 2】挂单追高/杀跌灾难修复                           |
 //+------------------------------------------------------------------+
 int SendBuyStopOrder(double triggerPrice, double stopLoss, double takeProfit)
 {
@@ -769,6 +775,13 @@ int SendBuyStopOrder(double triggerPrice, double stopLoss, double takeProfit)
    // StopLevel 检查
    double stopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL) * Point;
    double ask = Ask;
+
+   // 【Critical Fix 2】如果价格已突破触发价，放弃挂单（防止追高）
+   if(ask >= triggerPrice)
+   {
+      Print("【挂单放弃】BuyStop: 价格已突破触发价, Ask=", ask, " >= Trigger=", triggerPrice);
+      return -1;  // 放弃挂单，不追高
+   }
 
    if(triggerPrice - ask < stopLevel)
    {
@@ -809,6 +822,7 @@ int SendBuyStopOrder(double triggerPrice, double stopLoss, double takeProfit)
 
 //+------------------------------------------------------------------+
 //| 【Critical Fix 1】发送 Sell Stop 挂单                             |
+//| 【Critical Fix 2】挂单追高/杀跌灾难修复                           |
 //+------------------------------------------------------------------+
 int SendSellStopOrder(double triggerPrice, double stopLoss, double takeProfit)
 {
@@ -821,6 +835,13 @@ int SendSellStopOrder(double triggerPrice, double stopLoss, double takeProfit)
 
    double stopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL) * Point;
    double bid = Bid;
+
+   // 【Critical Fix 2】如果价格已跌破触发价，放弃挂单（防止杀跌）
+   if(bid <= triggerPrice)
+   {
+      Print("【挂单放弃】SellStop: 价格已跌破触发价, Bid=", bid, " <= Trigger=", triggerPrice);
+      return -1;  // 放弃挂单，不杀跌
+   }
 
    if(bid - triggerPrice < stopLevel)
    {
@@ -1030,20 +1051,48 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
    // 策略B出场
    if(strategy == "B")
    {
+      // 【Critical Fix 3】止损锁死机制 - 静态变量追踪历史止损
+      static double lastTrailingStopBuy = 0;
+      static double lastTrailingStopSell = 1000000;
+      static int lastBuyTicket = -1;
+      static int lastSellTicket = -1;
+
       if(positionType == OP_BUY)
       {
          if(Bid <= positionSL)
          {
             shouldClose = true;
             reason = "初始止损";
+            // 重置追踪止损状态
+            lastTrailingStopBuy = 0;
+            lastBuyTicket = -1;
          }
          else
          {
             double trailingStop = highestPrice - InpTrailingATRMult * currentATR;
-            if(Bid <= trailingStop && highestPrice > positionOpenPrice)
+
+            // 【Critical Fix 3】止损锁死：只有当新止损大于历史止损时才允许更新
+            // 防止因ATR放大导致止损倒退
+            if(lastBuyTicket != positionTicket)
+            {
+               // 新持仓，重置追踪止损
+               lastTrailingStopBuy = trailingStop;
+               lastBuyTicket = positionTicket;
+            }
+            else if(trailingStop > lastTrailingStopBuy)
+            {
+               // 止损只能上移，严禁下降
+               lastTrailingStopBuy = trailingStop;
+            }
+            // else: 止损倒退，忽略，保持历史最高止损位
+
+            if(Bid <= lastTrailingStopBuy && highestPrice > positionOpenPrice)
             {
                shouldClose = true;
                reason = "追踪止损";
+               // 平仓后重置
+               lastTrailingStopBuy = 0;
+               lastBuyTicket = -1;
             }
          }
       }
@@ -1053,14 +1102,36 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
          {
             shouldClose = true;
             reason = "初始止损";
+            // 重置追踪止损状态
+            lastTrailingStopSell = 1000000;
+            lastSellTicket = -1;
          }
          else
          {
             double trailingStop = lowestPrice + InpTrailingATRMult * currentATR;
-            if(Ask >= trailingStop && lowestPrice < positionOpenPrice)
+
+            // 【Critical Fix 3】止损锁死：只有当新止损小于历史止损时才允许更新
+            // 防止因ATR放大导致止损倒退（空头止损上移）
+            if(lastSellTicket != positionTicket)
+            {
+               // 新持仓，重置追踪止损
+               lastTrailingStopSell = trailingStop;
+               lastSellTicket = positionTicket;
+            }
+            else if(trailingStop < lastTrailingStopSell)
+            {
+               // 止损只能下移，严禁上升
+               lastTrailingStopSell = trailingStop;
+            }
+            // else: 止损倒退，忽略，保持历史最低止损位
+
+            if(Ask >= lastTrailingStopSell && lowestPrice < positionOpenPrice)
             {
                shouldClose = true;
                reason = "追踪止损";
+               // 平仓后重置
+               lastTrailingStopSell = 1000000;
+               lastSellTicket = -1;
             }
          }
       }
