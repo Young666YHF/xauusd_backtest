@@ -288,12 +288,13 @@ bool IsEuropeanSession()
 }
 
 //+------------------------------------------------------------------+
-//| 【任务1.5 修复】按日锚定 VWAP 计算                                |
-//| 每日开盘重置累加量，而非滚动窗口                                  |
+//| 【任务2 修复】按日锚定 VWAP 计算 (彻底重写)                       |
+//| 使用静态变量记录已收盘K线累计，避免Tick级重复累加                 |
 //+------------------------------------------------------------------+
 double GetDailyVWAP()
 {
    datetime currentDate = iTime(NULL, PERIOD_D1, 0);
+   static datetime s_lastProcessedBarTime = 0;
 
    // 新的一天，重置累计量
    if(currentDate != g_vwapDate)
@@ -302,15 +303,42 @@ double GetDailyVWAP()
       g_dailyTPV = 0;
       g_dailyVolume = 0;
       g_dailyVWAP = 0;
+      s_lastProcessedBarTime = 0;
+
+      // 遍历当日从 00:00 到当前时间的所有已收盘的 M15 K 线
+      // 找到当日开始的 M15 K 线索引
+      datetime todayStart = currentDate;  // 当日 00:00
+      datetime currentTime = TimeCurrent();
+
+      // 从最新的 K 线向回遍历，累加当日所有已收盘的 K 线
+      for(int i = 1; i <= 96; i++)  // 最多遍历 96 根 M15 K 线 (24小时)
+      {
+         datetime barTime = iTime(NULL, PERIOD_M15, i);
+         if(barTime < todayStart) break;  // 超出当日范围
+
+         double barHigh = iHigh(NULL, PERIOD_M15, i);
+         double barLow = iLow(NULL, PERIOD_M15, i);
+         double barClose = iClose(NULL, PERIOD_M15, i);
+         double barVolume = iVolume(NULL, PERIOD_M15, i);
+
+         double typicalPrice = (barHigh + barLow + barClose) / 3.0;
+         g_dailyTPV += typicalPrice * barVolume;
+         g_dailyVolume += barVolume;
+      }
    }
 
-   // 使用当前形成中的 K 线数据累加 (M15 周期)
-   // 典型价格 = (High + Low + Close) / 3
-   double typicalPrice = (iHigh(NULL, PERIOD_M15, 0) + iLow(NULL, PERIOD_M15, 0) + iClose(NULL, PERIOD_M15, 0)) / 3.0;
-   double volume = iVolume(NULL, PERIOD_M15, 0);
+   // 检查当前形成中的 M15 K 线是否已处理 (避免同一根 K 线重复累加)
+   datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
+   if(currentBarTime != s_lastProcessedBarTime)
+   {
+      s_lastProcessedBarTime = currentBarTime;
 
-   g_dailyTPV += typicalPrice * volume;
-   g_dailyVolume += volume;
+      // 加上当前形成中的第 0 根 K 线 (使用实时 Bid/Ask 中点，忽略 Tick 级伪成交量膨胀)
+      // 【关键修复】使用 (Bid+Ask)/2 * 1 代替 iVolume，避免 Tick 数量被放大
+      double midPrice = (Bid + Ask) / 2.0;
+      g_dailyTPV += midPrice * 1.0;  // 假设当前 K 线贡献 1 单位成交量
+      g_dailyVolume += 1.0;
+   }
 
    if(g_dailyVolume > 0)
       g_dailyVWAP = g_dailyTPV / g_dailyVolume;
@@ -589,6 +617,7 @@ void CheckPendingEntryEveryTick(double currentATR)
 //+------------------------------------------------------------------+
 //| 【任务1.1 修复】MQL4 原生下单函数                                 |
 //| 使用标准 MT4 OrderSend 语法，删除 MqlTradeRequest                |
+//| 【任务2 新增】实盘容错：Error 138/146 重试机制                    |
 //+------------------------------------------------------------------+
 bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
 {
@@ -615,26 +644,62 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
    sl = NormalizeDouble(sl, digits);
    if(tp > 0) tp = NormalizeDouble(tp, digits);
 
-   // 【MQL4 原生 OrderSend】
-   // 语法: OrderSend(Symbol(), Type, Lots, Price, Slippage, SL, TP, Comment, Magic, Expiration, Color)
-   int ticket = OrderSend(
-      Symbol(),                // 货币对
-      orderType,               // 订单类型 (OP_BUY 或 OP_SELL)
-      InpLotSize,              // 手数
-      price,                   // 入场价格
-      InpSlippage,             // 滑点
-      sl,                      // 止损
-      tp,                      // 止盈
-      InpTradeComment + "_" + strategy,  // 注释
-      InpMagicNumber,          // 魔术数字
-      0,                       // 过期时间 (0 = 无)
-      arrowColor               // 箭头颜色
-   );
+   // 【任务2 新增】实盘容错：最多重试 3 次
+   int maxRetries = 3;
+   int ticket = -1;
+
+   for(int retry = 0; retry < maxRetries; retry++)
+   {
+      // 【MQL4 原生 OrderSend】
+      // 语法: OrderSend(Symbol(), Type, Lots, Price, Slippage, SL, TP, Comment, Magic, Expiration, Color)
+      ticket = OrderSend(
+         Symbol(),                // 货币对
+         orderType,               // 订单类型 (OP_BUY 或 OP_SELL)
+         InpLotSize,              // 手数
+         price,                   // 入场价格
+         InpSlippage,             // 滑点
+         sl,                      // 止损
+         tp,                      // 止盈
+         InpTradeComment + "_" + strategy,  // 注释
+         InpMagicNumber,          // 魔术数字
+         0,                       // 过期时间 (0 = 无)
+         arrowColor               // 箭头颜色
+      );
+
+      if(ticket >= 0)
+      {
+         // 下单成功
+         break;
+      }
+
+      int error = GetLastError();
+
+      // Error 138 (重新报价) 或 Error 146 (服务器忙) 时重试
+      if(error == 138 || error == 146)
+      {
+         Print("【MQL4下单重试】错误码: ", error, " 描述: ", ErrorDescription(error),
+               " 重试次数: ", retry + 1, "/", maxRetries);
+         Sleep(100);
+         RefreshRates();
+
+         // 更新价格 (重新报价后价格可能变化)
+         if(orderType == OP_BUY)
+            price = Ask;
+         else
+            price = Bid;
+      }
+      else
+      {
+         // 其他错误，不重试
+         Print("【MQL4下单失败】错误码: ", error, " 描述: ", ErrorDescription(error));
+         return false;
+      }
+   }
 
    if(ticket < 0)
    {
       int error = GetLastError();
-      Print("【MQL4下单失败】错误码: ", error, " 描述: ", ErrorDescription(error));
+      Print("【MQL4下单最终失败】错误码: ", error, " 描述: ", ErrorDescription(error));
       return false;
    }
 
@@ -757,6 +822,7 @@ void CheckExitConditions(int positionType, double positionSL, double positionOpe
 
 //+------------------------------------------------------------------+
 //| 【任务1.1 修复】MQL4 原生平仓函数                                 |
+//| 【任务2 新增】实盘容错：Error 138/146 重试机制                    |
 //+------------------------------------------------------------------+
 bool ClosePositionMQL4(string reason)
 {
@@ -793,25 +859,61 @@ bool ClosePositionMQL4(string reason)
                continue;
             }
 
-            // 【MQL4 原生平仓 OrderSend】
-            int closeTicket = OrderSend(
-               Symbol(),
-               closeType,
-               lots,
-               closePrice,
-               InpSlippage,
-               0,  // SL
-               0,  // TP
-               InpTradeComment + "_平仓_" + reason,
-               InpMagicNumber,
-               0,
-               arrowColor
-            );
+            // 【任务2 新增】实盘容错：最多重试 3 次
+            int maxRetries = 3;
+            int closeTicket = -1;
+
+            for(int retry = 0; retry < maxRetries; retry++)
+            {
+               // 【MQL4 原生平仓 OrderSend】
+               closeTicket = OrderSend(
+                  Symbol(),
+                  closeType,
+                  lots,
+                  closePrice,
+                  InpSlippage,
+                  0,  // SL
+                  0,  // TP
+                  InpTradeComment + "_平仓_" + reason,
+                  InpMagicNumber,
+                  0,
+                  arrowColor
+               );
+
+               if(closeTicket >= 0)
+               {
+                  // 平仓成功
+                  break;
+               }
+
+               int error = GetLastError();
+
+               // Error 138 (重新报价) 或 Error 146 (服务器忙) 时重试
+               if(error == 138 || error == 146)
+               {
+                  Print("【MQL4平仓重试】错误码: ", error, " 描述: ", ErrorDescription(error),
+                        " 重试次数: ", retry + 1, "/", maxRetries);
+                  Sleep(100);
+                  RefreshRates();
+
+                  // 更新价格 (重新报价后价格可能变化)
+                  if(orderType == OP_BUY)
+                     closePrice = Bid;
+                  else
+                     closePrice = Ask;
+               }
+               else
+               {
+                  // 其他错误，不重试
+                  Print("【MQL4平仓失败】错误码: ", error, " 描述: ", ErrorDescription(error));
+                  return false;
+               }
+            }
 
             if(closeTicket < 0)
             {
                int error = GetLastError();
-               Print("【MQL4平仓失败】错误码: ", error, " 描述: ", ErrorDescription(error));
+               Print("【MQL4平仓最终失败】错误码: ", error, " 描述: ", ErrorDescription(error));
                return false;
             }
 

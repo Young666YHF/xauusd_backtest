@@ -101,7 +101,8 @@ squeeze_release = squeeze_release_up or squeeze_release_down
 is_trend = squeeze_ratio >= squeeze_threshold
 is_range = squeeze_ratio < squeeze_threshold
 
-current_hour = hour(time)
+// 【任务3 修复】时区严格定义：使用 "Asia/Shanghai" 确保北京时间正确
+current_hour = hour(time, "Asia/Shanghai")
 is_asian_session = (current_hour >= asian_start) and (current_hour < asian_end)
 is_european_session = (current_hour >= european_start) or (current_hour < european_end)
 

@@ -505,76 +505,95 @@ def _create_numba_matcher():
 
                     # ═══════════════════════════════════════════════════════════
                     # 策略 A 出场逻辑 (均值回归)
+                    # 【任务1 修复】Bid/Ask 倒挂修复 + 出场滑点
                     # ═══════════════════════════════════════════════════════════
                     if current_strategy == 1:
-                        # 止损检查
-                        # 【Bug 4 修复】跳空出场: 止损触发时必须用实际 tick 价格，不能用止损价
-                        # 否则跳空时会以"神仙价"成交，造成回测作弊
+                        # 止损检查 (市价单，需要加滑点)
                         if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_bid  # Bug 4: 多头止损用 Bid
+                                # 【任务1 修复】多头止损用 Bid，并加滑点惩罚
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_bid - slippage
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_ask  # Bug 4: 空头止损用 Ask
+                                # 【任务1 修复】空头止损用 Ask，并加滑点惩罚
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_ask + slippage
 
-                        # VWAP 止盈检查
-                        # 【Bug 4 修复】止盈同样用 tick 价格 (跳空越过限价单时以更优价成交)
+                        # VWAP 止盈检查 (限价单属性，滑点减半)
                         if not should_exit:
                             if current_direction == 1:  # 多头
-                                if tick_ask >= current_vwap:
+                                # 【任务1 关键修复】多头止盈：平仓是卖出，必须用 Bid！
+                                # 原代码错误地使用了 tick_ask
+                                if tick_bid >= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    exit_price = tick_ask  # Bug 4: 多头止盈用 Ask
+                                    # 限价单：滑点减半
+                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
+                                    exit_price = tick_bid - slippage
                             else:  # 空头
-                                if tick_bid <= current_vwap:
+                                # 【任务1 关键修复】空头止盈：平仓是买入，必须用 Ask！
+                                # 原代码错误地使用了 tick_bid
+                                if tick_ask <= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    exit_price = tick_bid  # Bug 4: 空头止盈用 Bid
+                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
+                                    exit_price = tick_ask + slippage
 
-                        # 时间止损
+                        # 时间止损 (市价单)
                         if not should_exit and bars_held >= max_hold_bars_a:
                             should_exit = True
                             exit_reason = EXIT_REASON_TIME_STOP
-                            # 时间止损使用 Bid (多头) 或 Ask (空头)
-                            exit_price = tick_bid if current_direction == 1 else tick_ask
+                            slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                            # 【任务1 修复】多头用 Bid，空头用 Ask
+                            if current_direction == 1:
+                                exit_price = tick_bid - slippage
+                            else:
+                                exit_price = tick_ask + slippage
 
                     # ═══════════════════════════════════════════════════════════
                     # 策略 B 出场逻辑 (动量突破)
+                    # 【任务1 修复】Bid/Ask 倒挂修复 + 出场滑点
                     # ═══════════════════════════════════════════════════════════
                     elif current_strategy == 2:
-                        # 初始止损检查
-                        # 【Bug 4 修复】跳空出场: 止损触发时必须用实际 tick 价格
+                        # 初始止损检查 (市价单，需要加滑点)
                         if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_bid  # Bug 4: 多头止损用 Bid
+                                # 【任务1 修复】多头止损用 Bid，加滑点
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_bid - slippage
                         else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_ask  # Bug 4: 空头止损用 Ask
+                                # 【任务1 修复】空头止损用 Ask，加滑点
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_ask + slippage
 
-                        # 追踪止损检查 (只有盈利时才启用)
-                        # 【Bug 4 修复】跳空出场: 追踪止损触发时必须用实际 tick 价格
+                        # 追踪止损检查 (市价单，需要加滑点)
                         if not should_exit:
                             if current_direction == 1:  # 多头
                                 trailing_stop = highest_price - trailing_mult_b * current_atr
-                                # 只有最高价超过入场价才启用追踪止损
                                 if tick_bid <= trailing_stop and highest_price > entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    exit_price = tick_bid  # Bug 4: 多头追踪止损用 Bid
+                                    # 【任务1 修复】多头追踪止损用 Bid，加滑点
+                                    slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                    exit_price = tick_bid - slippage
                             else:  # 空头
                                 trailing_stop = lowest_price + trailing_mult_b * current_atr
                                 if tick_ask >= trailing_stop and lowest_price < entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    exit_price = tick_ask  # Bug 4: 空头追踪止损用 Ask
+                                    # 【任务1 修复】空头追踪止损用 Ask，加滑点
+                                    slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                    exit_price = tick_ask + slippage
 
                     # ═══════════════════════════════════════════════════════════
                     # 执行出场
@@ -847,61 +866,94 @@ def _create_numba_matcher():
                     exit_price = tick_bid
 
                     if current_strategy == 1:
-                        # 【Bug 4 修复】跳空出场: 止损/止盈触发时必须用实际 tick 价格
-                        if current_direction == 1:
+                        # ════════════════════════════════════════════════════════════════
+                        # 【任务1 修复】策略A出场逻辑 - Bid/Ask 倒挂修复 + 出场滑点
+                        # ════════════════════════════════════════════════════════════════
+                        # 止损检查 (市价单，需要加滑点)
+                        if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_bid  # Bug 4: 多头止损用 Bid
-                        else:
+                                # 【任务1 修复】多头止损用 Bid，并加滑点惩罚
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_bid - slippage
+                        else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_ask  # Bug 4: 空头止损用 Ask
+                                # 【任务1 修复】空头止损用 Ask，并加滑点惩罚
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_ask + slippage
 
+                        # VWAP 止盈检查 (限价单属性，滑点减半)
                         if not should_exit:
-                            if current_direction == 1:
-                                if tick_ask >= current_vwap:
+                            if current_direction == 1:  # 多头
+                                # 【任务1 关键修复】多头止盈：平仓是卖出，必须用 Bid！
+                                # 原代码错误地使用了 tick_ask
+                                if tick_bid >= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    exit_price = tick_ask  # Bug 4: 多头止盈用 Ask
-                            else:
-                                if tick_bid <= current_vwap:
+                                    # 限价单：滑点减半
+                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
+                                    exit_price = tick_bid - slippage
+                            else:  # 空头
+                                # 【任务1 关键修复】空头止盈：平仓是买入，必须用 Ask！
+                                # 原代码错误地使用了 tick_bid
+                                if tick_ask <= current_vwap:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TAKE_PROFIT
-                                    exit_price = tick_bid  # Bug 4: 空头止盈用 Bid
+                                    slippage = (BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO) * 0.5
+                                    exit_price = tick_ask + slippage
 
+                        # 时间止损 (市价单)
                         if not should_exit and bars_held >= max_hold_bars_a:
                             should_exit = True
                             exit_reason = EXIT_REASON_TIME_STOP
-                            exit_price = tick_bid if current_direction == 1 else tick_ask
+                            slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                            # 【任务1 修复】多头用 Bid，空头用 Ask
+                            if current_direction == 1:
+                                exit_price = tick_bid - slippage
+                            else:
+                                exit_price = tick_ask + slippage
 
                     elif current_strategy == 2:
-                        # 【Bug 4 修复】跳空出场: 止损/追踪止损触发时必须用实际 tick 价格
-                        if current_direction == 1:
+                        # ════════════════════════════════════════════════════════════════
+                        # 【任务1 修复】策略B出场逻辑 - Bid/Ask 倒挂修复 + 出场滑点
+                        # ════════════════════════════════════════════════════════════════
+                        # 初始止损检查 (市价单，需要加滑点)
+                        if current_direction == 1:  # 多头
                             if tick_bid <= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_bid  # Bug 4: 多头止损用 Bid
-                        else:
+                                # 【任务1 修复】多头止损用 Bid，加滑点
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_bid - slippage
+                        else:  # 空头
                             if tick_ask >= current_sl:
                                 should_exit = True
                                 exit_reason = EXIT_REASON_STOP_LOSS
-                                exit_price = tick_ask  # Bug 4: 空头止损用 Ask
+                                # 【任务1 修复】空头止损用 Ask，加滑点
+                                slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                exit_price = tick_ask + slippage
 
+                        # 追踪止损检查 (市价单，需要加滑点)
                         if not should_exit:
-                            if current_direction == 1:
+                            if current_direction == 1:  # 多头
                                 trailing_stop = highest_price - trailing_mult_b * current_atr
                                 if tick_bid <= trailing_stop and highest_price > entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    exit_price = tick_bid  # Bug 4: 多头追踪止损用 Bid
-                            else:
+                                    # 【任务1 修复】多头追踪止损用 Bid，加滑点
+                                    slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                    exit_price = tick_bid - slippage
+                            else:  # 空头
                                 trailing_stop = lowest_price + trailing_mult_b * current_atr
                                 if tick_ask >= trailing_stop and lowest_price < entry_price:
                                     should_exit = True
                                     exit_reason = EXIT_REASON_TRAILING_STOP
-                                    exit_price = tick_ask  # Bug 4: 空头追踪止损用 Ask
+                                    # 【任务1 修复】空头追踪止损用 Ask，加滑点
+                                    slippage = BASE_SLIPPAGE + current_atr * ATR_SLIPPAGE_RATIO
+                                    exit_price = tick_ask + slippage
 
                     if should_exit:
                         # 【Bug 1 修复】直接使用出场价，不再加减 spread/2
