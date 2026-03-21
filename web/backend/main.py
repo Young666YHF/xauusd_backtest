@@ -9,7 +9,12 @@ from fastapi.responses import FileResponse, HTMLResponse
 from contextlib import asynccontextmanager
 import os
 
-# Import API routers
+# Import API routers (support both direct run and module import)
+import sys
+backend_dir = os.path.dirname(__file__)
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 from api.backtest import router as backtest_router
 from api.optimize import router as optimize_router
 

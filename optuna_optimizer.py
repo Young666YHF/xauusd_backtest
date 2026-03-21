@@ -246,7 +246,8 @@ def calculate_custom_fitness(
     min_trades: int = 100,
     verbose: bool = False,
     equity_curve: pd.DataFrame = None,
-    timeframe: str = '15m'
+    timeframe: str = '15m',
+    spread_per_ounce: float = 0.6
 ) -> float:
     """
     计算自定义适应度函数（修复版）
@@ -255,11 +256,17 @@ def calculate_custom_fitness(
     1. 使用真实equity_curve计算Calmar，而非简化模拟
     2. 平滑惩罚函数，避免断崖式惩罚撕裂贝叶斯模型
 
+    【任务4 新增】
+    3. 增加对微利交易的惩罚（Average Win < 点差的3倍）
+       - 防止算法拟合出高频剥头皮策略
+       - 实盘中会被手续费吞噬
+
     设计理念:
     1. Calmar比率作为核心指标（收益/风险）
     2. 交易次数不足时使用平滑衰减因子
     3. 胜率作为次要调整因子
     4. 夏普比率作为补充
+    5. 【任务4】微利交易惩罚
 
     Args:
         stats: 回测统计字典
@@ -267,6 +274,7 @@ def calculate_custom_fitness(
         verbose: 是否打印调试信息
         equity_curve: 权益曲线DataFrame（可选，用于精确计算）
         timeframe: K线周期
+        spread_per_ounce: 每盎司点差（XAUUSD 典型值为 $0.6）
 
     Returns:
         适应度值（越高越好）
@@ -277,6 +285,14 @@ def calculate_custom_fitness(
     win_rate = stats.get('win_rate', 0)
     sharpe_ratio = stats.get('sharpe_ratio', 0)
     profit_factor = stats.get('profit_factor', 1)
+
+    # 【任务4 新增】获取平均盈利
+    avg_win = stats.get('avg_win', 0)
+    avg_loss = stats.get('avg_loss', 0)
+
+    # 【任务4】计算佣金后净利润（每手双边 $7）
+    commission_per_lot = 7.0  # 双边佣金
+    net_profit_after_commission = stats.get('total_pnl', 0) - (total_trades * commission_per_lot / 2)  # 粗略估算
 
     # ========== 平滑惩罚函数 ==========
     # 修复: 使用连续平滑衰减，而非断崖式惩罚
@@ -330,6 +346,21 @@ def calculate_custom_fitness(
     if profit_factor > 1.5:
         fitness += (profit_factor - 1.5) * 10
 
+    # ========== 【任务4 新增】微利交易惩罚 ==========
+    # 如果平均盈利小于点差的 3 倍，说明策略是高频剥头皮
+    # 实盘中会被手续费吞噬，应该惩罚
+    min_profitable_win = spread_per_ounce * 3 * 100  # 点差 * 3 * 合约乘数 (100盎司/手)
+    scalping_penalty = 0.0
+
+    if avg_win > 0 and avg_win < min_profitable_win:
+        # 微利交易惩罚：平均盈利越小，惩罚越大
+        scalping_ratio = avg_win / min_profitable_win  # 0~1 之间
+        scalping_penalty = (1.0 - scalping_ratio) * 50  # 最高惩罚 50 分
+        fitness -= scalping_penalty
+
+        if verbose:
+            print(f"  [微利交易惩罚] 平均盈利 ${avg_win:.2f} < 阈值 ${min_profitable_win:.2f}, 惩罚: -{scalping_penalty:.2f}")
+
     # 极端情况处理
     if total_trades < 5:
         # 交易次数过少，返回负值但保持平滑
@@ -340,6 +371,8 @@ def calculate_custom_fitness(
               f"Trades: {total_trades}, Win: {win_rate:.1f}%, "
               f"TradeFactor: {trade_factor:.2f}, Calmar: {calmar:.2f}, "
               f"Fitness: {fitness:.2f}")
+        # 【任务4 新增】打印扣除佣金后的净利润
+        print(f"  [佣金后净利润] 扣除每手 ${commission_per_lot:.1f} 佣金后: ${net_profit_after_commission:.2f}")
 
     return fitness
 

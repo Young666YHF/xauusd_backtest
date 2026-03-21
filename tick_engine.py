@@ -124,6 +124,10 @@ CONTRACT_SIZE = 100             # 合约乘数 (XAUUSD: 每手 100 盎司)
 BASE_SLIPPAGE = 0.15            # 基础滑点 ($0.15 = 15 pips)
 ATR_SLIPPAGE_RATIO = 0.03       # ATR 滑点比例 (波动越大滑点越大)
 
+# 【任务2.2 新增】佣金成本建模
+COMMISSION_PER_LOT = 3.5        # 单边佣金 (美元/手) - 双边共 $7/手
+COMMISSION_ROUND_TRIP = 7.0     # 双边佣金 (美元/手) = 开仓 + 平仓
+
 
 # =============================================================================
 # Task 1: 数据转换层 (Data Serialization)
@@ -373,7 +377,9 @@ def _create_numba_matcher():
             initial_capital: float,
             contract_size: float,
             max_hold_bars_a: int,
-            trailing_mult_b: float
+            trailing_mult_b: float,
+            position_size: float = 1.0,
+            commission_per_lot: float = 3.5
         ) -> Tuple[np.ndarray, np.ndarray, int, int, int]:
             """
             Numba JIT 编译的超高速 Tick 撮合引擎
@@ -387,6 +393,13 @@ def _create_numba_matcher():
             │ Bug 3: 修复跳空缺口时间旅行 Bug                                         │
             │   - 策略 B 突破入场时，用 target_price 成交 = 以不存在的价格作弊         │
             │   - 修复: 成交价锚定触发 Tick 的真实 Bid/Ask，而非预期目标价             │
+            ├────────────────────────────────────────────────────────────────────────┤
+            │ 【任务2.1】前视偏差修复                                                 │
+            │   - ATR/VWAP 使用 bar_idx - 1 (已收盘 K 线)，而非当前形成中的 K 线       │
+            ├────────────────────────────────────────────────────────────────────────┤
+            │ 【任务2.2】佣金成本建模                                                 │
+            │   - 每笔交易扣除双边佣金 = commission_per_lot * 2 * position_size       │
+            │   - 默认单边 $3.5/手，双边 $7/手                                        │
             └────────────────────────────────────────────────────────────────────────┘
 
             【核心逻辑】
@@ -407,6 +420,8 @@ def _create_numba_matcher():
             contract_size: 合约乘数
             max_hold_bars_a: 策略 A 最大持仓 K 线数
             trailing_mult_b: 策略 B 追踪止损 ATR 倍数
+            position_size: 持仓手数 (用于佣金计算)
+            commission_per_lot: 单边佣金 (美元/手)
 
             【返回值】
             (trades_record, equity_curve, total_trades, winning_trades, total_ticks)
@@ -457,10 +472,13 @@ def _create_numba_matcher():
                 tick_ask = ticks_array[tick_idx, TICK_ASK]
                 bar_idx = int(ticks_array[tick_idx, TICK_BAR_IDX])
 
-                # 获取当前 K 线的统计指标 (预加载避免重复索引)
-                if bar_idx < n_bars:
-                    current_atr = bar_stats[bar_idx, BAR_ATR]
-                    current_vwap = bar_stats[bar_idx, BAR_VWAP]
+                # 【任务2.1 修复】消除前视偏差：使用上一根已收盘的 K 线数据
+                # 当前 tick 所属的 K 线可能仍在形成中，其指标值未确定
+                # 必须使用 bar_idx - 1 的已收盘 K 线数据
+                prev_bar_idx = max(0, bar_idx - 1)
+                if prev_bar_idx < n_bars:
+                    current_atr = bar_stats[prev_bar_idx, BAR_ATR]
+                    current_vwap = bar_stats[prev_bar_idx, BAR_VWAP]
                 else:
                     current_atr = 5.0
                     current_vwap = (tick_bid + tick_ask) / 2
@@ -569,7 +587,10 @@ def _create_numba_matcher():
 
                         # 计算盈亏
                         price_diff = (actual_exit - entry_price) * current_direction
-                        pnl = price_diff * contract_size
+                        # 【任务2.2 修复】扣除双边佣金 (开仓 + 平仓)
+                        gross_pnl = price_diff * contract_size
+                        commission_cost = commission_per_lot * 2.0 * position_size  # 双边佣金
+                        pnl = gross_pnl - commission_cost
                         pnl_pct = pnl / initial_capital * 100
 
                         # 更新资金
@@ -728,7 +749,10 @@ def _create_numba_matcher():
                     exit_price = ticks_array[last_tick_idx, TICK_ASK]
 
                 price_diff = (exit_price - entry_price) * current_direction
-                pnl = price_diff * contract_size
+                # 【任务2.2 修复】扣除双边佣金
+                gross_pnl = price_diff * contract_size
+                commission_cost = commission_per_lot * 2.0 * position_size
+                pnl = gross_pnl - commission_cost
                 capital += pnl
 
                 if trade_count < MAX_TRADES:
@@ -766,11 +790,14 @@ def _create_numba_matcher():
             initial_capital: float,
             contract_size: float,
             max_hold_bars_a: int,
-            trailing_mult_b: float
+            trailing_mult_b: float,
+            position_size: float = 1.0,
+            commission_per_lot: float = 3.5
         ) -> Tuple[np.ndarray, np.ndarray, int, int, int]:
             """
             纯 Python 回退版本 (逻辑与 Numba 版本完全相同)
             Bug 1 修复: 删除 spread 参数
+            【任务2.2】增加佣金参数: position_size, commission_per_lot
             """
             n_ticks = len(ticks_array)
             n_signals = len(signals_array)
@@ -803,8 +830,10 @@ def _create_numba_matcher():
                 tick_ask = ticks_array[tick_idx, TICK_ASK]
                 bar_idx = int(ticks_array[tick_idx, TICK_BAR_IDX])
 
-                current_atr = bar_stats[bar_idx, BAR_ATR] if bar_idx < n_bars else 5.0
-                current_vwap = bar_stats[bar_idx, BAR_VWAP] if bar_idx < n_bars else (tick_bid + tick_ask) / 2
+                # 【任务2.1 修复】消除前视偏差：使用上一根已收盘的 K 线数据
+                prev_bar_idx = max(0, bar_idx - 1)
+                current_atr = bar_stats[prev_bar_idx, BAR_ATR] if prev_bar_idx < n_bars else 5.0
+                current_vwap = bar_stats[prev_bar_idx, BAR_VWAP] if prev_bar_idx < n_bars else (tick_bid + tick_ask) / 2
 
                 if is_in_position:
                     if current_direction == 1:
@@ -879,7 +908,10 @@ def _create_numba_matcher():
                         actual_exit = exit_price
 
                         price_diff = (actual_exit - entry_price) * current_direction
-                        pnl = price_diff * contract_size
+                        # 【任务2.2 修复】扣除双边佣金
+                        gross_pnl = price_diff * contract_size
+                        commission_cost = commission_per_lot * 2.0 * position_size
+                        pnl = gross_pnl - commission_cost
                         capital += pnl
 
                         if trade_count < MAX_TRADES:
@@ -997,7 +1029,10 @@ def _create_numba_matcher():
                     exit_price = ticks_array[last_tick_idx, TICK_ASK]
 
                 price_diff = (exit_price - entry_price) * current_direction
-                pnl = price_diff * contract_size
+                # 【任务2.2 修复】扣除双边佣金
+                gross_pnl = price_diff * contract_size
+                commission_cost = commission_per_lot * 2.0 * position_size
+                pnl = gross_pnl - commission_cost
                 capital += pnl
 
                 if trade_count < MAX_TRADES:
@@ -1141,6 +1176,7 @@ class NumbaTickBacktestEngine:
 
         # 调用 Numba 核心
         # 【Bug 1 修复】不再传递 spread 参数
+        # 【任务2.2 修复】传递 position_size 和 commission_per_lot
         trades_record, equity_curve, total_trades, winning_trades, total_ticks = fast_tick_matcher(
             self._cached_ticks_array,
             signals_array,
@@ -1148,7 +1184,9 @@ class NumbaTickBacktestEngine:
             self.initial_capital,
             float(self.contract_size),
             max_hold_bars_a,
-            trailing_mult_b
+            trailing_mult_b,
+            self.position_size,  # 【任务2.2 新增】
+            COMMISSION_PER_LOT   # 【任务2.2 新增】使用全局常量
         )
 
         elapsed = time.time() - start_time
@@ -1367,7 +1405,9 @@ if __name__ == "__main__":
         initial_capital=100000,
         contract_size=100,
         max_hold_bars_a=5,
-        trailing_mult_b=4.89
+        trailing_mult_b=4.89,
+        position_size=1.0,
+        commission_per_lot=COMMISSION_PER_LOT
     )
     elapsed = time.time() - start
 

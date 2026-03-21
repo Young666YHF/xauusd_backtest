@@ -2,14 +2,18 @@
 //| XAUUSD Dual Strategy EA - MQL4 Implementation                    |
 //|                                                                  |
 //| 策略说明:                                                        |
-//|   策略A - 均值回归 (亚盘 06:00-14:00)                             |
-//|   策略B - 动量突破 (欧美盘 15:00-00:00)                           |
+//|   策略A - 均值回归 (亚盘 06:00-14:00 北京时间)                    |
+//|   策略B - 动量突破 (欧美盘 15:00-00:00 北京时间)                  |
 //|                                                                  |
-//| 与Python Tick引擎微观执行对齐 - 2026-03-21 重构                   |
+//| 2026-03-21 重构:                                                 |
+//|   - 完全重写为标准 MQL4 语法 (原代码混用 MQL5)                   |
+//|   - 增加时区参数 InpBrokerUTCOffset                              |
+//|   - VWAP 改为按日锚定                                            |
+//|   - 消除前视偏差                                                 |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, XAUUSD Dual Strategy"
 #property link      ""
-#property version   "3.00"
+#property version   "4.00"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -54,11 +58,12 @@ input double InpVolatilityFilterMult = 1.79; // 波动率过滤倍数
 input int    InpPullbackBars = 3;           // 回踩确认K线数
 input double InpEMAMomentumThreshold = 0.00082; // EMA动能阈值
 
-// 交易时段设置 (北京时间 UTC+8)
-input int    InpAsianStart = 6;          // 亚盘开始小时
-input int    InpAsianEnd = 14;           // 亚盘结束小时
-input int    InpEuropeanStart = 15;      // 欧美盘开始小时
-input int    InpEuropeanEnd = 0;         // 欧美盘结束小时 (次日0点)
+// 【任务1.4 新增】时区参数
+input int    InpBrokerUTCOffset = 2;     // 券商服务器UTC时区 (冬令时通常为2, 夏令时为3)
+input int    InpAsianStartBJ = 6;        // 亚盘开始小时 (北京时间 UTC+8)
+input int    InpAsianEndBJ = 14;         // 亚盘结束小时 (北京时间 UTC+8)
+input int    InpEuropeanStartBJ = 15;    // 欧美盘开始小时 (北京时间 UTC+8)
+input int    InpEuropeanEndBJ = 0;       // 欧美盘结束小时 (北京时间 UTC+8, 0表示次日0点)
 
 // 交易设置
 input double InpLotSize = 1.0;           // 交易手数
@@ -73,12 +78,6 @@ input bool   InpEnableStrategyB = true;  // 启用策略B
 //+------------------------------------------------------------------+
 //| 全局变量                                                          |
 //+------------------------------------------------------------------+
-int g_bbHandle = INVALID_HANDLE;         // 布林带指标句柄
-int g_atrHandle = INVALID_HANDLE;        // ATR指标句柄
-int g_rsiHandle = INVALID_HANDLE;        // RSI指标句柄
-int g_emaFastHandle = INVALID_HANDLE;    // EMA快线句柄
-int g_emaSlowHandle = INVALID_HANDLE;    // EMA慢线句柄
-
 // 持仓状态
 string g_currentStrategy = "";           // 当前策略 "A" 或 "B"
 int g_barsHeld = 0;                      // 持仓K线数
@@ -86,24 +85,23 @@ datetime g_entryTime = 0;                // 入场时间
 double g_entryPrice = 0;                 // 入场价格
 double g_fixedStopLoss = 0;              // 固定止损
 double g_highestSinceEntry = 0;          // 入场后最高价
-double g_lowestSinceEntry = DBL_MAX;     // 入场后最低价
+double g_lowestSinceEntry = 1000000;     // 入场后最低价
 double g_avgATR = 0;                     // 入场时平均ATR (用于动态时间止损)
 
-// VWAP 缓存 (优化性能)
-double g_cachedVWAP = 0;
-datetime g_vwapLastUpdate = 0;
+// 【任务1.5 新增】VWAP 按日锚定缓存
+double g_dailyVWAP = 0;
+datetime g_vwapDate = 0;
+double g_dailyTPV = 0;                   // 日内累计 (Typical Price * Volume)
+double g_dailyVolume = 0;                // 日内累计成交量
 
 // 策略B待确认状态 (Tick级挂单入场)
 bool g_pendingConfirmation = false;
 int g_pendingDirection = 0;               // 1=多, -1=空
 double g_pendingBreakoutHigh = 0;        // 突破K线最高价 (挂单触发价)
 double g_pendingBreakoutLow = 0;         // 突破K线最低价 (挂单触发价)
-double g_pendingBBUpper = 0;
-double g_pendingBBLower = 0;
 double g_pendingATR = 0;
 double g_pendingPrevLow = 0;
 double g_pendingPrevHigh = 0;
-double g_pendingEMADiff = 0;
 int g_confirmationBarsLeft = 0;
 
 //+------------------------------------------------------------------+
@@ -111,14 +109,10 @@ int g_confirmationBarsLeft = 0;
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print("=== XAUUSD Dual Strategy EA v3.0 初始化 ===");
-   Print("【微观执行对齐】出场检查 + 策略B入场 = 每Tick执行");
-
-   if(!InitializeIndicators())
-   {
-      Print("指标初始化失败!");
-      return(INIT_FAILED);
-   }
+   Print("=== XAUUSD Dual Strategy EA v4.0 (MQL4 标准语法) ===");
+   Print("【时区设置】券商UTC偏移: ", InpBrokerUTCOffset, " 小时");
+   Print("【时区转换】北京时间亚盘: ", InpAsianStartBJ, "-", InpAsianEndBJ);
+   Print("【时区转换】北京时间欧美盘: ", InpEuropeanStartBJ, "-次日", InpEuropeanEndBJ);
 
    LoadPositionState();
    Print("=== 初始化完成 ===");
@@ -131,47 +125,10 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    Print("=== XAUUSD Dual Strategy EA 停止 ===");
-   ReleaseIndicators();
 }
 
 //+------------------------------------------------------------------+
-//| 初始化指标                                                        |
-//+------------------------------------------------------------------+
-bool InitializeIndicators()
-{
-   g_bbHandle = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE);
-   if(g_bbHandle == INVALID_HANDLE) { Print("布林带创建失败"); return false; }
-
-   g_atrHandle = iATR(NULL, PERIOD_M15, InpATRPeriod);
-   if(g_atrHandle == INVALID_HANDLE) { Print("ATR创建失败"); return false; }
-
-   g_rsiHandle = iRSI(NULL, PERIOD_M15, InpRSIPeriod, PRICE_CLOSE);
-   if(g_rsiHandle == INVALID_HANDLE) { Print("RSI创建失败"); return false; }
-
-   g_emaFastHandle = iMA(NULL, PERIOD_M15, InpEMAFast, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_emaFastHandle == INVALID_HANDLE) { Print("EMA快线创建失败"); return false; }
-
-   g_emaSlowHandle = iMA(NULL, PERIOD_M15, InpEMASlow, 0, MODE_EMA, PRICE_CLOSE);
-   if(g_emaSlowHandle == INVALID_HANDLE) { Print("EMA慢线创建失败"); return false; }
-
-   Print("所有指标初始化成功");
-   return true;
-}
-
-//+------------------------------------------------------------------+
-//| 释放指标                                                          |
-//+------------------------------------------------------------------+
-void ReleaseIndicators()
-{
-   if(g_bbHandle != INVALID_HANDLE) IndicatorRelease(g_bbHandle);
-   if(g_atrHandle != INVALID_HANDLE) IndicatorRelease(g_atrHandle);
-   if(g_rsiHandle != INVALID_HANDLE) IndicatorRelease(g_rsiHandle);
-   if(g_emaFastHandle != INVALID_HANDLE) IndicatorRelease(g_emaFastHandle);
-   if(g_emaSlowHandle != INVALID_HANDLE) IndicatorRelease(g_emaSlowHandle);
-}
-
-//+------------------------------------------------------------------+
-//| 每个Tick处理 (微观执行对齐)                                       |
+//| 每个Tick处理 (MQL4 标准语法)                                      |
 //+------------------------------------------------------------------+
 void OnTick()
 {
@@ -180,48 +137,78 @@ void OnTick()
    datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
    bool newBar = (currentBarTime != lastBarTime);
 
-   // 获取指标值
-   double bbUpper[], bbMiddle[], bbLower[], atr[], rsi[], emaFast[], emaSlow[];
-   if(CopyBuffer(g_bbHandle, UPPER_BAND, 0, 1, bbUpper) < 1) return;
-   if(CopyBuffer(g_bbHandle, BASE_LINE, 0, 1, bbMiddle) < 1) return;
-   if(CopyBuffer(g_bbHandle, LOWER_BAND, 0, 1, bbLower) < 1) return;
-   if(CopyBuffer(g_atrHandle, 0, 0, 1, atr) < 1) return;
-   if(CopyBuffer(g_rsiHandle, 0, 0, 1, rsi) < 1) return;
-   if(CopyBuffer(g_emaFastHandle, 0, 0, 1, emaFast) < 1) return;
-   if(CopyBuffer(g_emaSlowHandle, 0, 0, 1, emaSlow) < 1) return;
+   // 【MQL4 原生方式】获取指标值 - 使用当前K线的前一根已收盘K线 (索引1)
+   // 消除前视偏差：所有指标使用索引1，而非索引0
+   double bbUpper = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_UPPER, 1);
+   double bbLower = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_LOWER, 1);
+   double bbMiddle = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_MAIN, 1);
 
-   // 计算肯特纳通道
-   double kcUpper, kcMiddle, kcLower;
-   CalculateKeltnerChannel(kcUpper, kcMiddle, kcLower, atr[0]);
+   double atr = iATR(NULL, PERIOD_M15, InpATRPeriod, 1);
+   double rsi = iRSI(NULL, PERIOD_M15, InpRSIPeriod, PRICE_CLOSE, 1);
 
-   // 获取当前价格
+   double emaFast = iMA(NULL, PERIOD_M15, InpEMAFast, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double emaSlow = iMA(NULL, PERIOD_M15, InpEMASlow, 0, MODE_EMA, PRICE_CLOSE, 1);
+
+   // 计算肯特纳通道 (使用 EMA + ATR)
+   double kcMiddle = iMA(NULL, PERIOD_M15, InpKCPeriod, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double kcUpper = kcMiddle + InpKCATRMult * atr;
+   double kcLower = kcMiddle - InpKCATRMult * atr;
+
+   // 获取当前价格 (实时价格用于出场检查)
    double close = iClose(NULL, PERIOD_M15, 0);
    double high = iHigh(NULL, PERIOD_M15, 0);
    double low = iLow(NULL, PERIOD_M15, 0);
 
+   // 【任务1.4 修复】时区转换后的交易时段判断
    bool isAsian = IsAsianSession();
    bool isEuropean = IsEuropeanSession();
 
    // 计算波动率指标
-   double squeezeRatio = CalculateSqueezeRatio(bbUpper[0], bbLower[0], bbMiddle[0], kcUpper, kcLower);
+   double squeezeRatio = CalculateSqueezeRatio(bbUpper, bbLower, bbMiddle, kcUpper, kcLower);
    bool isTrend = (squeezeRatio >= InpSqueezeThreshold);
-   bool squeezeRelease = CheckSqueezeRelease(bbUpper, bbLower, kcUpper, kcLower);
+   bool squeezeRelease = CheckSqueezeRelease();
 
-   // 获取VWAP (简化计算)
-   double vwap = GetVWAP();
+   // 【任务1.5 修复】获取按日锚定的 VWAP
+   double vwap = GetDailyVWAP();
 
    // ═══════════════════════════════════════════════════════════════════
-   // 【Task 1.1】持仓出场检查 - 每Tick实时执行 (移出 newBar 限制)
-   // 与Python Tick引擎对齐: 止损/追踪止损/止盈必须实时检查
+   // 【MQL4 原生持仓遍历】检查是否有当前货币对+魔术数字的持仓
    // ═══════════════════════════════════════════════════════════════════
-   if(PositionSelect(Symbol()))
+   int totalOrders = OrdersTotal();
+   bool hasPosition = false;
+   int positionTicket = -1;
+   double positionSize = 0;
+   int positionType = -1;
+   double positionSL = 0;
+   double positionOpenPrice = 0;
+
+   for(int i = totalOrders - 1; i >= 0; i--)
    {
-      // 更新持仓统计 (每Tick更新最高最低价)
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber)
+         {
+            hasPosition = true;
+            positionTicket = OrderTicket();
+            positionSize = OrderLots();
+            positionType = OrderType();
+            positionSL = OrderStopLoss();
+            positionOpenPrice = OrderOpenPrice();
+            break;
+         }
+      }
+   }
+
+   // ═══════════════════════════════════════════════════════════════════
+   // 持仓出场检查 - 每Tick实时执行
+   // ═══════════════════════════════════════════════════════════════════
+   if(hasPosition)
+   {
+      // 更新持仓统计
       UpdatePositionStats(high, low);
 
-      // 【关键修复】出场检查移出 newBar 限制，每Tick执行
-      // 使用当前实时 atr[0] 计算
-      CheckExitConditions(close, Bid, Ask, atr[0], vwap);
+      // 出场检查
+      CheckExitConditions(positionType, positionSL, positionOpenPrice, atr, vwap);
 
       // 只在新K线时更新持仓K线数
       if(newBar)
@@ -237,14 +224,10 @@ void OnTick()
          ResetPositionState();
       }
 
-      // ═════════════════════════════════════════════════════════════════
-      // 【Task 1.3】策略B挂单级入场 - 每Tick检测价格突破
-      // 与Python Tick引擎对齐: Ask >= breakout_high 时立即入场
-      // ═════════════════════════════════════════════════════════════════
+      // 策略B挂单入场检测
       if(g_pendingConfirmation)
       {
-         // 【关键修复】每Tick检测，不等待 newBar
-         CheckPendingEntryEveryTick(atr[0]);
+         CheckPendingEntryEveryTick(atr);
       }
 
       // 入场信号检查 (只在 newBar 时检测新信号)
@@ -253,15 +236,15 @@ void OnTick()
          // 策略A检查 - 均值回归
          if(InpEnableStrategyA && isAsian && !g_pendingConfirmation)
          {
-            CheckStrategyAEntry(close, bbUpper[0], bbLower[0], rsi[0], atr[0], high, low);
+            CheckStrategyAEntry(close, bbUpper, bbLower, rsi, atr, high, low);
          }
 
-         // 策略B检查 - 动量突破 (设置待确认状态)
+         // 策略B检查 - 动量突破
          if(InpEnableStrategyB && isEuropean && !g_pendingConfirmation)
          {
-            CheckStrategyBEntry(close, bbUpper[0], bbLower[0], bbMiddle[0],
-                               kcUpper, kcLower, emaFast[0], emaSlow[0],
-                               isTrend, squeezeRelease, atr[0], high, low);
+            CheckStrategyBEntry(close, bbUpper, bbLower, bbMiddle,
+                               kcUpper, kcLower, emaFast, emaSlow,
+                               isTrend, squeezeRelease, atr, high, low);
          }
       }
    }
@@ -270,57 +253,69 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| 【Task 1.3】每Tick检测策略B挂单入场                               |
-//| 与Python Tick引擎对齐: 价格突破时立即执行                         |
+//| 【任务1.4 修复】检查是否为亚盘时段 (时区转换版)                   |
+//| 北京时间 -> 券商服务器时间                                        |
 //+------------------------------------------------------------------+
-void CheckPendingEntryEveryTick(double currentATR)
+bool IsAsianSession()
 {
-   if(!g_pendingConfirmation) return;
+   // 北京时间 UTC+8, 券商服务器时间 = UTC + InpBrokerUTCOffset
+   // 北京时间 = 服务器时间 + (8 - InpBrokerUTCOffset)
+   int serverHour = TimeHour(TimeCurrent());
+   int beijingHour = serverHour + (8 - InpBrokerUTCOffset);
 
-   // 多头挂单: Ask >= 突破高点时入场
-   if(g_pendingDirection == 1)
-   {
-      // 【关键对齐】Python: tick_ask >= breakout_high 时入场
-      if(Ask >= g_pendingBreakoutHigh)
-      {
-         Print("【Tick级入场】多头触发: Ask=", Ask, " >= BreakoutHigh=", g_pendingBreakoutHigh);
+   // 处理跨日
+   if(beijingHour >= 24) beijingHour -= 24;
+   if(beijingHour < 0) beijingHour += 24;
 
-         double sl = MathMax(g_pendingBreakoutHigh - InpSLATRMultB * g_pendingATR, g_pendingPrevLow);
-         g_avgATR = CalculateAverageATR();
-
-         OpenPositionWithPrice(ORDER_TYPE_BUY, g_pendingBreakoutHigh, sl, 0, "B");
-         ResetPullbackState();
-         return;
-      }
-   }
-   // 空头挂单: Bid <= 突破低点时入场
-   else if(g_pendingDirection == -1)
-   {
-      // 【关键对齐】Python: tick_bid <= breakout_low 时入场
-      if(Bid <= g_pendingBreakoutLow)
-      {
-         Print("【Tick级入场】空头触发: Bid=", Bid, " <= BreakoutLow=", g_pendingBreakoutLow);
-
-         double sl = MathMin(g_pendingBreakoutLow + InpSLATRMultB * g_pendingATR, g_pendingPrevHigh);
-         g_avgATR = CalculateAverageATR();
-
-         OpenPositionWithPrice(ORDER_TYPE_SELL, g_pendingBreakoutLow, sl, 0, "B");
-         ResetPullbackState();
-         return;
-      }
-   }
-
-   // 超时检查 (在 newBar 时由调用方处理)
+   return (beijingHour >= InpAsianStartBJ && beijingHour < InpAsianEndBJ);
 }
 
 //+------------------------------------------------------------------+
-//| 计算肯特纳通道                                                    |
+//| 【任务1.4 修复】检查是否为欧美盘时段 (时区转换版)                 |
 //+------------------------------------------------------------------+
-void CalculateKeltnerChannel(double &upper, double &middle, double &lower, double atr)
+bool IsEuropeanSession()
 {
-   middle = iMA(NULL, PERIOD_M15, InpKCPeriod, 0, MODE_EMA, PRICE_CLOSE, 0);
-   upper = middle + InpKCATRMult * atr;
-   lower = middle - InpKCATRMult * atr;
+   int serverHour = TimeHour(TimeCurrent());
+   int beijingHour = serverHour + (8 - InpBrokerUTCOffset);
+
+   if(beijingHour >= 24) beijingHour -= 24;
+   if(beijingHour < 0) beijingHour += 24;
+
+   if(InpEuropeanEndBJ == 0)
+      return (beijingHour >= InpEuropeanStartBJ);
+   else
+      return (beijingHour >= InpEuropeanStartBJ || beijingHour < InpEuropeanEndBJ);
+}
+
+//+------------------------------------------------------------------+
+//| 【任务1.5 修复】按日锚定 VWAP 计算                                |
+//| 每日开盘重置累加量，而非滚动窗口                                  |
+//+------------------------------------------------------------------+
+double GetDailyVWAP()
+{
+   datetime currentDate = iTime(NULL, PERIOD_D1, 0);
+
+   // 新的一天，重置累计量
+   if(currentDate != g_vwapDate)
+   {
+      g_vwapDate = currentDate;
+      g_dailyTPV = 0;
+      g_dailyVolume = 0;
+      g_dailyVWAP = 0;
+   }
+
+   // 使用当前形成中的 K 线数据累加 (M15 周期)
+   // 典型价格 = (High + Low + Close) / 3
+   double typicalPrice = (iHigh(NULL, PERIOD_M15, 0) + iLow(NULL, PERIOD_M15, 0) + iClose(NULL, PERIOD_M15, 0)) / 3.0;
+   double volume = iVolume(NULL, PERIOD_M15, 0);
+
+   g_dailyTPV += typicalPrice * volume;
+   g_dailyVolume += volume;
+
+   if(g_dailyVolume > 0)
+      g_dailyVWAP = g_dailyTPV / g_dailyVolume;
+
+   return g_dailyVWAP;
 }
 
 //+------------------------------------------------------------------+
@@ -337,17 +332,25 @@ double CalculateSqueezeRatio(double bbUpper, double bbLower, double bbMiddle,
 }
 
 //+------------------------------------------------------------------+
-//| 检查波动率挤压释放                                                |
+//| 检查波动率挤压释放 (MQL4 原生)                                    |
 //+------------------------------------------------------------------+
-bool CheckSqueezeRelease(double &bbUpper[], double &bbLower[],
-                         double kcUpper, double kcLower)
+bool CheckSqueezeRelease()
 {
-   double bbUpperPrev[], bbLowerPrev[];
-   if(CopyBuffer(g_bbHandle, UPPER_BAND, 1, 1, bbUpperPrev) < 1) return false;
-   if(CopyBuffer(g_bbHandle, LOWER_BAND, 1, 1, bbLowerPrev) < 1) return false;
+   // 当前 K 线的布林带和肯特纳通道
+   double bbUpper0 = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_UPPER, 1);
+   double bbLower0 = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_LOWER, 1);
 
-   bool releaseUp = (bbUpper[0] > kcUpper) && (bbUpperPrev[0] <= kcUpper);
-   bool releaseDown = (bbLower[0] < kcLower) && (bbLowerPrev[0] >= kcLower);
+   double atr0 = iATR(NULL, PERIOD_M15, InpATRPeriod, 1);
+   double kcMiddle0 = iMA(NULL, PERIOD_M15, InpKCPeriod, 0, MODE_EMA, PRICE_CLOSE, 1);
+   double kcUpper0 = kcMiddle0 + InpKCATRMult * atr0;
+   double kcLower0 = kcMiddle0 - InpKCATRMult * atr0;
+
+   // 前一根 K 线的布林带
+   double bbUpper1 = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_UPPER, 2);
+   double bbLower1 = iBands(NULL, PERIOD_M15, InpBBPeriod, 0, InpBBStd, PRICE_CLOSE, MODE_LOWER, 2);
+
+   bool releaseUp = (bbUpper0 > kcUpper0) && (bbUpper1 <= kcUpper0);
+   bool releaseDown = (bbLower0 < kcLower0) && (bbLower1 >= kcLower0);
 
    return releaseUp || releaseDown;
 }
@@ -364,39 +367,6 @@ bool CheckAbnormalVolatility(double currentHigh, double currentLow, double atr)
       return true;
 
    return false;
-}
-
-//+------------------------------------------------------------------+
-//| 【Task 1.4】简化VWAP计算                                          |
-//| 使用缓存避免每Tick循环100次                                       |
-//+------------------------------------------------------------------+
-double GetVWAP()
-{
-   // 每根K线只计算一次
-   datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
-   if(currentBarTime == g_vwapLastUpdate)
-      return g_cachedVWAP;
-
-   g_vwapLastUpdate = currentBarTime;
-
-   // 简化计算: 使用最近20根K线
-   double cumulativeTPV = 0;
-   double cumulativeVol = 0;
-   int lookback = MathMin(20, iBars(NULL, PERIOD_M15));
-
-   for(int i = 0; i < lookback; i++)
-   {
-      double h = iHigh(NULL, PERIOD_M15, i);
-      double l = iLow(NULL, PERIOD_M15, i);
-      double c = iClose(NULL, PERIOD_M15, i);
-      double vol = (double)iVolume(NULL, PERIOD_M15, i);
-
-      cumulativeTPV += (h + l + c) / 3.0 * vol;
-      cumulativeVol += vol;
-   }
-
-   g_cachedVWAP = (cumulativeVol > 0) ? cumulativeTPV / cumulativeVol : iClose(NULL, PERIOD_M15, 0);
-   return g_cachedVWAP;
 }
 
 //+------------------------------------------------------------------+
@@ -418,7 +388,7 @@ int CalculateDynamicTimeStop(double entryATR, double avgATR)
 }
 
 //+------------------------------------------------------------------+
-//| 计算平均ATR                                                       |
+//| 计算平均ATR (MQL4 原生)                                           |
 //+------------------------------------------------------------------+
 double CalculateAverageATR()
 {
@@ -430,29 +400,6 @@ double CalculateAverageATR()
       if(atr > 0) { sum += atr; count++; }
    }
    return (count > 0) ? sum / count : 0;
-}
-
-//+------------------------------------------------------------------+
-//| 检查是否为亚盘时段                                                |
-//+------------------------------------------------------------------+
-bool IsAsianSession()
-{
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   return (dt.hour >= InpAsianStart && dt.hour < InpAsianEnd);
-}
-
-//+------------------------------------------------------------------+
-//| 检查是否为欧美盘时段                                              |
-//+------------------------------------------------------------------+
-bool IsEuropeanSession()
-{
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   if(InpEuropeanEnd == 0)
-      return (dt.hour >= InpEuropeanStart);
-   else
-      return (dt.hour >= InpEuropeanStart || dt.hour < InpEuropeanEnd);
 }
 
 //+------------------------------------------------------------------+
@@ -472,11 +419,22 @@ void CheckStrategyAEntry(double close, double bbUpper, double bbLower,
    {
       double slAnchor = MathMin(close, bbLower);
       double sl = slAnchor - InpSLATRMultA * atr;
-      double vwap = GetVWAP();
+      double vwap = GetDailyVWAP();
 
       g_avgATR = CalculateAverageATR();
       Print("策略A做多: 止损锚定=", slAnchor, " 止损=", sl);
-      OpenPosition(ORDER_TYPE_BUY, sl, vwap, "A");
+
+      // 【MQL4 原生下单】
+      if(OpenPositionMQL4(OP_BUY, sl, vwap, "A"))
+      {
+         g_currentStrategy = "A";
+         g_entryPrice = Ask;
+         g_fixedStopLoss = sl;
+         g_barsHeld = 0;
+         g_highestSinceEntry = Ask;
+         g_lowestSinceEntry = Ask;
+         SavePositionState();
+      }
       return;
    }
 
@@ -485,12 +443,21 @@ void CheckStrategyAEntry(double close, double bbUpper, double bbLower,
    {
       double slAnchor = MathMax(close, bbUpper);
       double sl = slAnchor + InpSLATRMultA * atr;
-      double vwap = GetVWAP();
+      double vwap = GetDailyVWAP();
 
       g_avgATR = CalculateAverageATR();
       Print("策略A做空: 止损锚定=", slAnchor, " 止损=", sl);
-      OpenPosition(ORDER_TYPE_SELL, sl, vwap, "A");
-      return;
+
+      if(OpenPositionMQL4(OP_SELL, sl, vwap, "A"))
+      {
+         g_currentStrategy = "A";
+         g_entryPrice = Bid;
+         g_fixedStopLoss = sl;
+         g_barsHeld = 0;
+         g_highestSinceEntry = Bid;
+         g_lowestSinceEntry = Bid;
+         SavePositionState();
+      }
    }
 }
 
@@ -516,7 +483,7 @@ void CheckStrategyBEntry(double close, double bbUpper, double bbLower, double bb
       double prevLow = iLow(NULL, PERIOD_M15, 1);
       double prevHigh = iHigh(NULL, PERIOD_M15, 1);
 
-      SetPullbackState(1, high, low, bbUpper, bbLower, atr, prevLow, prevHigh, emaFast - emaSlow);
+      SetPullbackState(1, high, low, atr, prevLow, prevHigh);
       Print("策略B: 做多信号待确认, 挂单价=", high, " 等待Ask突破...");
       return;
    }
@@ -527,9 +494,8 @@ void CheckStrategyBEntry(double close, double bbUpper, double bbLower, double bb
       double prevLow = iLow(NULL, PERIOD_M15, 1);
       double prevHigh = iHigh(NULL, PERIOD_M15, 1);
 
-      SetPullbackState(-1, high, low, bbUpper, bbLower, atr, prevLow, prevHigh, emaSlow - emaFast);
+      SetPullbackState(-1, high, low, atr, prevLow, prevHigh);
       Print("策略B: 做空信号待确认, 挂单价=", low, " 等待Bid跌破...");
-      return;
    }
 }
 
@@ -537,20 +503,16 @@ void CheckStrategyBEntry(double close, double bbUpper, double bbLower, double bb
 //| 设置待确认状态                                                    |
 //+------------------------------------------------------------------+
 void SetPullbackState(int direction, double breakoutHigh, double breakoutLow,
-                      double bbUpper, double bbLower, double atr,
-                      double prevLow, double prevHigh, double emaDiff)
+                      double atr, double prevLow, double prevHigh)
 {
    g_pendingConfirmation = true;
    g_confirmationBarsLeft = InpPullbackBars;
    g_pendingDirection = direction;
    g_pendingBreakoutHigh = breakoutHigh;
    g_pendingBreakoutLow = breakoutLow;
-   g_pendingBBUpper = bbUpper;
-   g_pendingBBLower = bbLower;
    g_pendingATR = atr;
    g_pendingPrevLow = prevLow;
    g_pendingPrevHigh = prevHigh;
-   g_pendingEMADiff = emaDiff;
 }
 
 //+------------------------------------------------------------------+
@@ -563,78 +525,123 @@ void ResetPullbackState()
    g_pendingDirection = 0;
    g_pendingBreakoutHigh = 0;
    g_pendingBreakoutLow = 0;
-   g_pendingBBUpper = 0;
-   g_pendingBBLower = 0;
    g_pendingATR = 0;
    g_pendingPrevLow = 0;
    g_pendingPrevHigh = 0;
-   g_pendingEMADiff = 0;
 }
 
 //+------------------------------------------------------------------+
-//| 开仓 (市价)                                                       |
+//| 每Tick检测策略B挂单入场                                           |
 //+------------------------------------------------------------------+
-bool OpenPosition(ENUM_ORDER_TYPE orderType, double sl, double tp, string strategy)
+void CheckPendingEntryEveryTick(double currentATR)
 {
-   if(PositionSelect(Symbol())) return false;
-   double price = (orderType == ORDER_TYPE_BUY) ? Ask : Bid;
-   return OpenPositionWithPrice(orderType, price, sl, tp, strategy);
-}
+   if(!g_pendingConfirmation) return;
 
-//+------------------------------------------------------------------+
-//| 开仓 (指定价格)                                                   |
-//+------------------------------------------------------------------+
-bool OpenPositionWithPrice(ENUM_ORDER_TYPE orderType, double price, double sl, double tp, string strategy)
-{
-   if(PositionSelect(Symbol())) return false;
-
-   double tickSize = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
-   sl = NormalizeDouble(MathRound(sl / tickSize) * tickSize, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
-   if(tp > 0)
-      tp = NormalizeDouble(MathRound(tp / tickSize) * tickSize, (int)SymbolInfoInteger(Symbol(), SYMBOL_DIGITS));
-
-   MqlTradeRequest request = {};
-   request.action = TRADE_ACTION_DEAL;
-   request.symbol = Symbol();
-   request.volume = InpLotSize;
-   request.type = orderType;
-   request.price = (orderType == ORDER_TYPE_BUY) ? Ask : Bid;
-   request.sl = sl;
-   request.tp = tp;
-   request.deviation = InpSlippage;
-   request.magic = InpMagicNumber;
-   request.comment = InpTradeComment + "_" + strategy;
-
-   MqlTradeResult result = {};
-
-   if(!OrderSend(request, result))
+   // 多头挂单: Ask >= 突破高点时入场
+   if(g_pendingDirection == 1)
    {
-      Print("开仓失败: ", GetLastError());
+      if(Ask >= g_pendingBreakoutHigh)
+      {
+         Print("【Tick级入场】多头触发: Ask=", Ask, " >= BreakoutHigh=", g_pendingBreakoutHigh);
+
+         double sl = MathMax(g_pendingBreakoutHigh - InpSLATRMultB * g_pendingATR, g_pendingPrevLow);
+         g_avgATR = CalculateAverageATR();
+
+         if(OpenPositionMQL4(OP_BUY, sl, 0, "B"))
+         {
+            g_currentStrategy = "B";
+            g_entryPrice = Ask;
+            g_fixedStopLoss = sl;
+            g_barsHeld = 0;
+            g_highestSinceEntry = Ask;
+            g_lowestSinceEntry = Ask;
+            SavePositionState();
+         }
+         ResetPullbackState();
+         return;
+      }
+   }
+   // 空头挂单: Bid <= 突破低点时入场
+   else if(g_pendingDirection == -1)
+   {
+      if(Bid <= g_pendingBreakoutLow)
+      {
+         Print("【Tick级入场】空头触发: Bid=", Bid, " <= BreakoutLow=", g_pendingBreakoutLow);
+
+         double sl = MathMin(g_pendingBreakoutLow + InpSLATRMultB * g_pendingATR, g_pendingPrevHigh);
+         g_avgATR = CalculateAverageATR();
+
+         if(OpenPositionMQL4(OP_SELL, sl, 0, "B"))
+         {
+            g_currentStrategy = "B";
+            g_entryPrice = Bid;
+            g_fixedStopLoss = sl;
+            g_barsHeld = 0;
+            g_highestSinceEntry = Bid;
+            g_lowestSinceEntry = Bid;
+            SavePositionState();
+         }
+         ResetPullbackState();
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 【任务1.1 修复】MQL4 原生下单函数                                 |
+//| 使用标准 MT4 OrderSend 语法，删除 MqlTradeRequest                |
+//+------------------------------------------------------------------+
+bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
+{
+   double price;
+   color arrowColor;
+
+   if(orderType == OP_BUY)
+   {
+      price = Ask;
+      arrowColor = clrBlue;
+   }
+   else if(orderType == OP_SELL)
+   {
+      price = Bid;
+      arrowColor = clrRed;
+   }
+   else
+   {
       return false;
    }
 
-   if(result.retcode == TRADE_RETCODE_DONE)
+   // 规范化价格精度
+   int digits = (int)MarketInfo(Symbol(), MODE_DIGITS);
+   sl = NormalizeDouble(sl, digits);
+   if(tp > 0) tp = NormalizeDouble(tp, digits);
+
+   // 【MQL4 原生 OrderSend】
+   // 语法: OrderSend(Symbol(), Type, Lots, Price, Slippage, SL, TP, Comment, Magic, Expiration, Color)
+   int ticket = OrderSend(
+      Symbol(),                // 货币对
+      orderType,               // 订单类型 (OP_BUY 或 OP_SELL)
+      InpLotSize,              // 手数
+      price,                   // 入场价格
+      InpSlippage,             // 滑点
+      sl,                      // 止损
+      tp,                      // 止盈
+      InpTradeComment + "_" + strategy,  // 注释
+      InpMagicNumber,          // 魔术数字
+      0,                       // 过期时间 (0 = 无)
+      arrowColor               // 箭头颜色
+   );
+
+   if(ticket < 0)
    {
-      g_currentStrategy = strategy;
-      g_entryTime = TimeCurrent();
-      g_entryPrice = price;
-      g_fixedStopLoss = sl;
-      g_barsHeld = 0;
-      g_highestSinceEntry = price;
-      g_lowestSinceEntry = price;
-
-      double atr[];
-      if(CopyBuffer(g_atrHandle, 0, 0, 1, atr) > 0)
-         ; // 不再保存 g_entryATR
-
-      Print("开仓成功: ", (orderType == ORDER_TYPE_BUY ? "做多" : "做空"),
-            " 策略", strategy, " 价格:", price, " 止损:", sl);
-
-      SavePositionState();
-      return true;
+      int error = GetLastError();
+      Print("【MQL4下单失败】错误码: ", error, " 描述: ", ErrorDescription(error));
+      return false;
    }
 
-   return false;
+   Print("【MQL4下单成功】Ticket: ", ticket, " 类型: ", (orderType == OP_BUY ? "BUY" : "SELL"),
+         " 价格: ", price, " 止损: ", sl, " 止盈: ", tp);
+
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -647,50 +654,40 @@ void UpdatePositionStats(double high, double low)
 }
 
 //+------------------------------------------------------------------+
-//| 【Task 1.1 & 1.2】出场条件检查 (每Tick执行)                       |
-//| 关键修复: 追踪止损使用当前实时ATR                                 |
+//| 出场条件检查 (每Tick执行)                                         |
 //+------------------------------------------------------------------+
-void CheckExitConditions(double close, double tickBid, double tickAsk, double currentATR, double vwap)
+void CheckExitConditions(int positionType, double positionSL, double positionOpenPrice,
+                         double currentATR, double vwap)
 {
-   if(!PositionSelect(Symbol())) return;
-
-   long posType = PositionGetInteger(POSITION_TYPE);
-   double sl = PositionGetDouble(POSITION_SL);
-
    bool shouldClose = false;
    string reason = "";
 
-   // ═══════════════════════════════════════════════════════════════════
-   // 策略A出场 (每Tick检查)
-   // ═══════════════════════════════════════════════════════════════════
+   // 策略A出场
    if(g_currentStrategy == "A")
    {
-      // 止损检查 (使用实际Tick价格)
-      if(posType == POSITION_TYPE_BUY)
+      if(positionType == OP_BUY)
       {
-         // 【与Python对齐】多头止损: tick_bid <= stop_loss
-         if(tickBid <= sl)
-         {
-            shouldClose = true;
-            reason = "止损";
-         }
-         // VWAP止盈 (使用Tick价格)
-         else if(tickAsk >= vwap)
-         {
-            shouldClose = true;
-            reason = "VWAP止盈";
-         }
-      }
-      else if(posType == POSITION_TYPE_SELL)
-      {
-         // 【与Python对齐】空头止损: tick_ask >= stop_loss
-         if(tickAsk >= sl)
+         // 止损检查
+         if(Bid <= positionSL)
          {
             shouldClose = true;
             reason = "止损";
          }
          // VWAP止盈
-         else if(tickBid <= vwap)
+         else if(Ask >= vwap)
+         {
+            shouldClose = true;
+            reason = "VWAP止盈";
+         }
+      }
+      else if(positionType == OP_SELL)
+      {
+         if(Ask >= positionSL)
+         {
+            shouldClose = true;
+            reason = "止损";
+         }
+         else if(Bid <= vwap)
          {
             shouldClose = true;
             reason = "VWAP止盈";
@@ -710,44 +707,39 @@ void CheckExitConditions(double close, double tickBid, double tickAsk, double cu
       }
    }
 
-   // ═══════════════════════════════════════════════════════════════════
-   // 策略B出场 (每Tick检查)
-   // ═══════════════════════════════════════════════════════════════════
+   // 策略B出场
    if(g_currentStrategy == "B")
    {
-      if(posType == POSITION_TYPE_BUY)
+      if(positionType == OP_BUY)
       {
          // 初始止损
-         if(tickBid <= sl)
+         if(Bid <= positionSL)
          {
             shouldClose = true;
             reason = "初始止损";
          }
-         // 【Task 1.2 关键修复】追踪止损使用当前实时ATR
-         // 与Python对齐: trailing_stop = highest_price - mult * current_atr
+         // 追踪止损
          else
          {
             double trailingStop = g_highestSinceEntry - InpTrailingATRMult * currentATR;
-            if(tickBid <= trailingStop && g_highestSinceEntry > g_entryPrice)
+            if(Bid <= trailingStop && g_highestSinceEntry > positionOpenPrice)
             {
                shouldClose = true;
                reason = "追踪止损";
             }
          }
       }
-      else if(posType == POSITION_TYPE_SELL)
+      else if(positionType == OP_SELL)
       {
-         // 初始止损
-         if(tickAsk >= sl)
+         if(Ask >= positionSL)
          {
             shouldClose = true;
             reason = "初始止损";
          }
-         // 【Task 1.2 关键修复】追踪止损使用当前实时ATR
          else
          {
             double trailingStop = g_lowestSinceEntry + InpTrailingATRMult * currentATR;
-            if(tickAsk >= trailingStop && g_lowestSinceEntry < g_entryPrice)
+            if(Ask >= trailingStop && g_lowestSinceEntry < positionOpenPrice)
             {
                shouldClose = true;
                reason = "追踪止损";
@@ -759,43 +751,75 @@ void CheckExitConditions(double close, double tickBid, double tickAsk, double cu
    // 执行平仓
    if(shouldClose)
    {
-      ClosePosition(reason);
+      ClosePositionMQL4(reason);
    }
 }
 
 //+------------------------------------------------------------------+
-//| 平仓                                                              |
+//| 【任务1.1 修复】MQL4 原生平仓函数                                 |
 //+------------------------------------------------------------------+
-bool ClosePosition(string reason)
+bool ClosePositionMQL4(string reason)
 {
-   if(!PositionSelect(Symbol())) return false;
+   int totalOrders = OrdersTotal();
 
-   long posType = PositionGetInteger(POSITION_TYPE);
-   double volume = PositionGetDouble(POSITION_VOLUME);
-
-   MqlTradeRequest request = {};
-   request.action = TRADE_ACTION_DEAL;
-   request.symbol = Symbol();
-   request.volume = volume;
-   request.type = (posType == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-   request.price = (posType == POSITION_TYPE_BUY) ? Bid : Ask;
-   request.deviation = InpSlippage;
-   request.magic = InpMagicNumber;
-   request.comment = InpTradeComment + "_平仓_" + reason;
-
-   MqlTradeResult result = {};
-
-   if(!OrderSend(request, result))
+   for(int i = totalOrders - 1; i >= 0; i--)
    {
-      Print("平仓失败: ", GetLastError());
-      return false;
-   }
+      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      {
+         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber)
+         {
+            int orderType = OrderType();
+            double lots = OrderLots();
+            int ticket = OrderTicket();
 
-   if(result.retcode == TRADE_RETCODE_DONE)
-   {
-      Print("平仓成功: 策略", g_currentStrategy, " 原因:", reason);
-      ResetPositionState();
-      return true;
+            int closeType;
+            double closePrice;
+            color arrowColor;
+
+            if(orderType == OP_BUY)
+            {
+               closeType = OP_SELL;
+               closePrice = Bid;
+               arrowColor = clrRed;
+            }
+            else if(orderType == OP_SELL)
+            {
+               closeType = OP_BUY;
+               closePrice = Ask;
+               arrowColor = clrBlue;
+            }
+            else
+            {
+               continue;
+            }
+
+            // 【MQL4 原生平仓 OrderSend】
+            int closeTicket = OrderSend(
+               Symbol(),
+               closeType,
+               lots,
+               closePrice,
+               InpSlippage,
+               0,  // SL
+               0,  // TP
+               InpTradeComment + "_平仓_" + reason,
+               InpMagicNumber,
+               0,
+               arrowColor
+            );
+
+            if(closeTicket < 0)
+            {
+               int error = GetLastError();
+               Print("【MQL4平仓失败】错误码: ", error, " 描述: ", ErrorDescription(error));
+               return false;
+            }
+
+            Print("【MQL4平仓成功】原Ticket: ", ticket, " 原因: ", reason, " 价格: ", closePrice);
+            ResetPositionState();
+            return true;
+         }
+      }
    }
 
    return false;
@@ -812,7 +836,7 @@ void ResetPositionState()
    g_entryPrice = 0;
    g_fixedStopLoss = 0;
    g_highestSinceEntry = 0;
-   g_lowestSinceEntry = DBL_MAX;
+   g_lowestSinceEntry = 1000000;
    SavePositionState();
 }
 
@@ -860,6 +884,49 @@ void LoadPositionState()
          Print("加载持仓状态: 策略", g_currentStrategy);
       }
       FileClose(handle);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| 错误描述 (MQL4 标准)                                              |
+//+------------------------------------------------------------------+
+string ErrorDescription(int error)
+{
+   switch(error)
+   {
+      case 0:   return "无错误";
+      case 1:   return "无错误，但结果未知";
+      case 2:   return "一般错误";
+      case 3:   return "错误的参数";
+      case 4:   return "交易服务器繁忙";
+      case 5:   return "旧版本的客户端终端";
+      case 6:   return "没有连接到交易服务器";
+      case 7:   return "权限不足";
+      case 8:   return "请求过于频繁";
+      case 9:   return "无效操作";
+      case 64:  return "账户被禁止";
+      case 65:  return "无效账户";
+      case 128: return "交易超时";
+      case 129: return "无效价格";
+      case 130: return "无效止损";
+      case 131: return "无效手数";
+      case 132: return "市场关闭";
+      case 133: return "交易被禁止";
+      case 134: return "资金不足";
+      case 135: return "价格改变";
+      case 136: return "价格改变";
+      case 137: return "经纪商繁忙";
+      case 138: return "重新报价";
+      case 139: return "订单被锁定";
+      case 140: return "只允许做多";
+      case 141: return "请求过多";
+      case 145: return "修改被拒绝";
+      case 146: return "交易子系统繁忙";
+      case 147: return "使用过期日期被禁止";
+      case 148: return "订单数量超出限制";
+      case 149: return "对冲被禁止";
+      case 150: return "禁止按FIFO平仓";
+      default:  return "未知错误 " + IntegerToString(error);
    }
 }
 //+------------------------------------------------------------------+
