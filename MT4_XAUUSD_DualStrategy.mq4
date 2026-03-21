@@ -88,12 +88,6 @@ double g_highestSinceEntry = 0;          // 入场后最高价
 double g_lowestSinceEntry = 1000000;     // 入场后最低价
 double g_avgATR = 0;                     // 入场时平均ATR (用于动态时间止损)
 
-// 【任务1.5 新增】VWAP 按日锚定缓存
-double g_dailyVWAP = 0;
-datetime g_vwapDate = 0;
-double g_dailyTPV = 0;                   // 日内累计 (Typical Price * Volume)
-double g_dailyVolume = 0;                // 日内累计成交量
-
 // 策略B待确认状态 (Tick级挂单入场)
 bool g_pendingConfirmation = false;
 int g_pendingDirection = 0;               // 1=多, -1=空
@@ -288,62 +282,27 @@ bool IsEuropeanSession()
 }
 
 //+------------------------------------------------------------------+
-//| 【任务2 修复】按日锚定 VWAP 计算 (彻底重写)                       |
-//| 使用静态变量记录已收盘K线累计，避免Tick级重复累加                 |
+//| 【终极修复】动态、无状态的 VWAP 计算                              |
+//| 每次调用从当日 00:00 遍历到当前 K 线，无缓存依赖                  |
 //+------------------------------------------------------------------+
 double GetDailyVWAP()
 {
    datetime currentDate = iTime(NULL, PERIOD_D1, 0);
-   static datetime s_lastProcessedBarTime = 0;
+   double dailyTPV = 0, dailyVolume = 0;
 
-   // 新的一天，重置累计量
-   if(currentDate != g_vwapDate)
+   // 从当前 K 线 (i=0) 往回遍历，直到跨日
+   for(int i = 0; i < 96; i++)
    {
-      g_vwapDate = currentDate;
-      g_dailyTPV = 0;
-      g_dailyVolume = 0;
-      g_dailyVWAP = 0;
-      s_lastProcessedBarTime = 0;
+      datetime barTime = iTime(NULL, PERIOD_M15, i);
+      if(barTime < currentDate) break;  // 超出当日范围
 
-      // 遍历当日从 00:00 到当前时间的所有已收盘的 M15 K 线
-      // 找到当日开始的 M15 K 线索引
-      datetime todayStart = currentDate;  // 当日 00:00
-      datetime currentTime = TimeCurrent();
-
-      // 从最新的 K 线向回遍历，累加当日所有已收盘的 K 线
-      for(int i = 1; i <= 96; i++)  // 最多遍历 96 根 M15 K 线 (24小时)
-      {
-         datetime barTime = iTime(NULL, PERIOD_M15, i);
-         if(barTime < todayStart) break;  // 超出当日范围
-
-         double barHigh = iHigh(NULL, PERIOD_M15, i);
-         double barLow = iLow(NULL, PERIOD_M15, i);
-         double barClose = iClose(NULL, PERIOD_M15, i);
-         double barVolume = iVolume(NULL, PERIOD_M15, i);
-
-         double typicalPrice = (barHigh + barLow + barClose) / 3.0;
-         g_dailyTPV += typicalPrice * barVolume;
-         g_dailyVolume += barVolume;
-      }
+      double typicalPrice = (iHigh(NULL, PERIOD_M15, i) + iLow(NULL, PERIOD_M15, i) + iClose(NULL, PERIOD_M15, i)) / 3.0;
+      double vol = (double)iVolume(NULL, PERIOD_M15, i);
+      dailyTPV += typicalPrice * vol;
+      dailyVolume += vol;
    }
 
-   // 检查当前形成中的 M15 K 线是否已处理 (避免同一根 K 线重复累加)
-   datetime currentBarTime = iTime(NULL, PERIOD_M15, 0);
-   if(currentBarTime != s_lastProcessedBarTime)
-   {
-      s_lastProcessedBarTime = currentBarTime;
-
-      // 加上当前形成中的第 0 根 K 线 (使用实时 Bid/Ask 中点，忽略 Tick 级伪成交量膨胀)
-      // 【关键修复】使用 (Bid+Ask)/2 * 1 代替 iVolume，避免 Tick 数量被放大
-      double midPrice = (Bid + Ask) / 2.0;
-      g_dailyTPV += midPrice * 1.0;  // 假设当前 K 线贡献 1 单位成交量
-      g_dailyVolume += 1.0;
-   }
-
-   if(g_dailyVolume > 0)
-      g_dailyVWAP = g_dailyTPV / g_dailyVolume;
-
-   return g_dailyVWAP;
+   return (dailyVolume > 0) ? (dailyTPV / dailyVolume) : iClose(NULL, PERIOD_M15, 0);
 }
 
 //+------------------------------------------------------------------+
@@ -615,9 +574,10 @@ void CheckPendingEntryEveryTick(double currentATR)
 }
 
 //+------------------------------------------------------------------+
-//| 【任务1.1 修复】MQL4 原生下单函数                                 |
-//| 使用标准 MT4 OrderSend 语法，删除 MqlTradeRequest                |
-//| 【任务2 新增】实盘容错：Error 138/146 重试机制                    |
+//| 【终极修复】MQL4 原生下单函数                                     |
+//| 使用标准 MT4 OrderSend 语法                                       |
+//| 实盘容错：Error 138/146 重试机制                                  |
+//| 【任务3 新增】StopLevel 防御机制，防止 Error 130                  |
 //+------------------------------------------------------------------+
 bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
 {
@@ -641,10 +601,35 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
 
    // 规范化价格精度
    int digits = (int)MarketInfo(Symbol(), MODE_DIGITS);
+
+   // 【任务3 新增】StopLevel 防御机制 - 防止 Error 130
+   double stopLevel = MarketInfo(Symbol(), MODE_STOPLEVEL) * Point;
+
+   if(orderType == OP_BUY)
+   {
+      // 多头止损必须低于入场价至少 stopLevel 距离
+      if(sl > 0 && price - sl < stopLevel)
+      {
+         double originalSL = sl;
+         sl = price - stopLevel;
+         Print("【StopLevel修正】多头止损过近: 原止损=", originalSL, " 修正后=", sl);
+      }
+   }
+   else // OP_SELL
+   {
+      // 空头止损必须高于入场价至少 stopLevel 距离
+      if(sl > 0 && sl - price < stopLevel)
+      {
+         double originalSL = sl;
+         sl = price + stopLevel;
+         Print("【StopLevel修正】空头止损过近: 原止损=", originalSL, " 修正后=", sl);
+      }
+   }
+
    sl = NormalizeDouble(sl, digits);
    if(tp > 0) tp = NormalizeDouble(tp, digits);
 
-   // 【任务2 新增】实盘容错：最多重试 3 次
+   // 【实盘容错】最多重试 3 次
    int maxRetries = 3;
    int ticket = -1;
 
@@ -821,8 +806,9 @@ void CheckExitConditions(int positionType, double positionSL, double positionOpe
 }
 
 //+------------------------------------------------------------------+
-//| 【任务1.1 修复】MQL4 原生平仓函数                                 |
-//| 【任务2 新增】实盘容错：Error 138/146 重试机制                    |
+//| 【终极修复】MQL4 原生平仓函数                                     |
+//| 使用 OrderClose() 替代反向 OrderSend，防止锁仓                    |
+//| 实盘容错：Error 138/146 重试机制                                  |
 //+------------------------------------------------------------------+
 bool ClosePositionMQL4(string reason)
 {
@@ -838,49 +824,39 @@ bool ClosePositionMQL4(string reason)
             double lots = OrderLots();
             int ticket = OrderTicket();
 
-            int closeType;
+            // 非持仓订单跳过
+            if(orderType != OP_BUY && orderType != OP_SELL)
+               continue;
+
             double closePrice;
             color arrowColor;
 
             if(orderType == OP_BUY)
             {
-               closeType = OP_SELL;
                closePrice = Bid;
                arrowColor = clrRed;
             }
-            else if(orderType == OP_SELL)
+            else // OP_SELL
             {
-               closeType = OP_BUY;
                closePrice = Ask;
                arrowColor = clrBlue;
             }
-            else
-            {
-               continue;
-            }
 
-            // 【任务2 新增】实盘容错：最多重试 3 次
+            // 规范化平仓价格
+            int digits = (int)MarketInfo(Symbol(), MODE_DIGITS);
+            closePrice = NormalizeDouble(closePrice, digits);
+
+            // 【实盘容错】最多重试 3 次
             int maxRetries = 3;
-            int closeTicket = -1;
+            bool closeResult = false;
 
             for(int retry = 0; retry < maxRetries; retry++)
             {
-               // 【MQL4 原生平仓 OrderSend】
-               closeTicket = OrderSend(
-                  Symbol(),
-                  closeType,
-                  lots,
-                  closePrice,
-                  InpSlippage,
-                  0,  // SL
-                  0,  // TP
-                  InpTradeComment + "_平仓_" + reason,
-                  InpMagicNumber,
-                  0,
-                  arrowColor
-               );
+               // 【MQL4 原生 OrderClose】
+               // 语法: bool OrderClose(ticket, lots, price, slippage, arrowColor)
+               closeResult = OrderClose(ticket, lots, closePrice, InpSlippage, arrowColor);
 
-               if(closeTicket >= 0)
+               if(closeResult == true)
                {
                   // 平仓成功
                   break;
@@ -898,9 +874,9 @@ bool ClosePositionMQL4(string reason)
 
                   // 更新价格 (重新报价后价格可能变化)
                   if(orderType == OP_BUY)
-                     closePrice = Bid;
+                     closePrice = NormalizeDouble(Bid, digits);
                   else
-                     closePrice = Ask;
+                     closePrice = NormalizeDouble(Ask, digits);
                }
                else
                {
@@ -910,14 +886,14 @@ bool ClosePositionMQL4(string reason)
                }
             }
 
-            if(closeTicket < 0)
+            if(closeResult == false)
             {
                int error = GetLastError();
                Print("【MQL4平仓最终失败】错误码: ", error, " 描述: ", ErrorDescription(error));
                return false;
             }
 
-            Print("【MQL4平仓成功】原Ticket: ", ticket, " 原因: ", reason, " 价格: ", closePrice);
+            Print("【MQL4平仓成功】Ticket: ", ticket, " 原因: ", reason, " 价格: ", closePrice, " 手数: ", lots);
             ResetPositionState();
             return true;
          }
