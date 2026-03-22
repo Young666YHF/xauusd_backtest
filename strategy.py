@@ -290,12 +290,22 @@ class TradingStrategy:
 
         direction = 0
 
-        # 做多信号检测
-        if close <= bb_lower and rsi < rsi_oversold:
+        # ═══════════════════════════════════════════════════════════════════════
+        # 【修复3.3】放宽布林带条件 - 使用"接近"而非"触及"
+        # 原条件: close <= bb_lower (太严格，bb_std=2.9 时几乎不会触及)
+        # 新条件: close <= bb_lower + atr * 0.5 (允许更大容差，提高交易频率)
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # 布林带容差（允许在布林带外侧一小段距离入场）
+        # 【优化】从0.3*ATR提高到0.5*ATR，增加入场机会
+        bb_tolerance = atr * 0.5
+
+        # 做多信号检测：价格接近或触及下轨
+        if close <= bb_lower + bb_tolerance and rsi < rsi_oversold:
             direction = 1
 
-        # 做空信号检测
-        elif close >= bb_upper and rsi > rsi_overbought:
+        # 做空信号检测：价格接近或触及上轨
+        elif close >= bb_upper - bb_tolerance and rsi > rsi_overbought:
             direction = -1
 
         if direction == 0:
@@ -347,27 +357,12 @@ class TradingStrategy:
         pending: PendingSignal
     ) -> Tuple[bool, bool, str]:
         """
-        检查当前K线是否满足价格行为确认条件（修复"接盘"问题）
+        检查当前K线是否满足价格行为确认条件
 
-        【修复3.1】放宽价格行为确认条件
-        - 多头: 只要不跌破布林带中轨，且价格突破 breakout_high 即可入场
-        - 空头: 只要不突破布林带中轨，且价格跌破 breakout_low 即可入场
-
-        原逻辑过于严苛：
-        - 要求收盘价始终在布林带外（导致大量有效突破被过滤）
-        - 只在创新高/低时触发（错过了很多趋势初期机会）
-
-        新逻辑：
-        - 使用布林带中轨作为"趋势生存线"
-        - 价格行为确认改为"突破触发"而非"等待回调"
-
-        Args:
-            df: 完整DataFrame
-            current_idx: 当前K线索引
-            pending: 待确认信号
-
-        Returns:
-            (确认是否完成, 确认是否失败, 原因说明)
+        【修复3.5】进一步放宽确认条件
+        - 不再要求突破新高/低
+        - 只要价格仍在趋势方向上，且没有跌破关键支撑，立即入场
+        - 目标：减少等待时间，增加交易频率
         """
         current_bar = df.iloc[current_idx]
         high = current_bar['High']
@@ -382,36 +377,30 @@ class TradingStrategy:
 
         # 检查是否超时
         if pending.bars_passed > pending.max_confirmation_bars:
-            return False, True, f"确认超时: {pending.bars_passed}根K线未触发价格行为确认"
+            return False, True, f"确认超时: {pending.bars_passed}根K线未触发确认"
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 【修复3.1】放宽的价格行为确认逻辑
+        # 【修复3.5】简化确认逻辑 - 快速入场
         # ═══════════════════════════════════════════════════════════════════════
 
         if pending.direction == 1:  # 向上突破
-            # 【放宽】条件1: 价格突破突破K线最高价 → 触发入场
-            if high > pending.breakout_high:
+            # 条件1: 立即入场（不再等待突破新高）
+            # 只要没有跌破中轨就入场
+            if close >= bb_middle:
                 pending.triggered = True
-                return True, False, f"价格行为确认成功: 最高价{high:.2f}突破{pending.breakout_high:.2f}"
+                return True, False, f"快速确认: 收盘价{close:.2f}在中轨{bb_middle:.2f}之上"
 
-            # 【放宽】条件2: 收盘价跌破布林带中轨 → 趋势失败
-            # 原逻辑: 收盘价 < bb_upper 就失败（太严苛）
-            # 新逻辑: 收盘价 < bb_middle 才失败（允许回调）
-            if close < bb_middle:
-                return False, True, f"确认失败: 收盘价{close:.2f}跌破中轨{bb_middle:.2f}"
+            # 条件2: 跌破中轨 → 失败
+            return False, True, f"确认失败: 收盘价{close:.2f}跌破中轨{bb_middle:.2f}"
 
         else:  # 向下突破
-            # 【放宽】条件1: 价格跌破突破K线最低价 → 触发入场
-            if low < pending.breakout_low:
+            # 条件1: 立即入场（不再等待突破新低）
+            if close <= bb_middle:
                 pending.triggered = True
-                return True, False, f"价格行为确认成功: 最低价{low:.2f}跌破{pending.breakout_low:.2f}"
+                return True, False, f"快速确认: 收盘价{close:.2f}在中轨{bb_middle:.2f}之下"
 
-            # 【放宽】条件2: 收盘价突破布林带中轨 → 趋势失败
-            if close > bb_middle:
-                return False, True, f"确认失败: 收盘价{close:.2f}突破中轨{bb_middle:.2f}"
-
-        # 继续等待
-        return False, False, f"等待价格行为确认: {pending.bars_passed}/{pending.max_confirmation_bars}"
+            # 条件2: 突破中轨 → 失败
+            return False, True, f"确认失败: 收盘价{close:.2f}突破中轨{bb_middle:.2f}"
 
     def generate_strategy_b_signal(
         self,
@@ -505,32 +494,30 @@ class TradingStrategy:
         direction = 0
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 【修复3.2】EMA 动能过滤 - 激活幽灵参数 ema_momentum_threshold
+        # 【修复3.4】放宽策略B布林带突破条件
+        # 原条件: close > bb_upper (太严格)
+        # 新条件: close > bb_upper - atr * 0.2 (允许容差)
         # ═══════════════════════════════════════════════════════════════════════
+
+        # 布林带突破容差 - 放宽以提高交易频率
+        # 【优化】从0.2*ATR提高到0.4*ATR
+        bb_break_tolerance = atr * 0.4
 
         # 计算 EMA 发散动能
         ema_momentum = abs(ema_fast - ema_slow) / ema_slow
         ema_momentum_threshold = self.ema_momentum_threshold  # 从 params 获取
 
-        # 向上突破检测 - 增加 EMA 动能过滤
-        if close > bb_upper and bb_upper > kc_upper:
-            # 原条件: 仅 ema_fast > ema_slow
-            # 新条件: ema_fast > ema_slow 且发散动能足够
+        # 向上突破检测 - 放宽布林带条件
+        if close > bb_upper - bb_break_tolerance and bb_upper > kc_upper:
             if ema_fast > ema_slow:
-                # 【激活】EMA 动能过滤
                 if ema_momentum > ema_momentum_threshold:
                     direction = 1
-                # else: EMA 虽然金叉但发散不足，不入场
 
-        # 向下突破检测 - 增加 EMA 动能过滤
-        elif close < bb_lower and bb_lower < kc_lower:
-            # 原条件: 仅 ema_fast < ema_slow
-            # 新条件: ema_fast < ema_slow 且发散动能足够
+        # 向下突破检测 - 放宽布林带条件
+        elif close < bb_lower + bb_break_tolerance and bb_lower < kc_lower:
             if ema_fast < ema_slow:
-                # 【激活】EMA 动能过滤
                 if ema_momentum > ema_momentum_threshold:
                     direction = -1
-                # else: EMA 虽然死叉但发散不足，不入场
 
         if direction == 0:
             return None

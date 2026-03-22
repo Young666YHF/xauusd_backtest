@@ -5,6 +5,15 @@
 //|   策略A - 均值回归 (亚盘 06:00-14:00 北京时间)                    |
 //|   策略B - 动量突破 (欧美盘 15:00-00:00 北京时间)                  |
 //|                                                                  |
+//| 2026-03-22 更新 v5.1:                                            |
+//|   - 【任务1 Critical】修复平仓函数"张冠李戴"Bug                   |
+//|     - ClosePositionMQL4 改为接收 ticket 参数                     |
+//|     - 移除 for 循环遍历，直接操作指定订单                         |
+//|   - 【任务2】引入动态仓位计算 (风险百分比法)                      |
+//|     - 新增参数 InpUseDynamicLot, InpRiskPercent                  |
+//|     - 新增函数 CalculateDynamicLotSize                           |
+//|     - 下单前自动计算手数，限制在 MINLOT/MAXLOT 范围              |
+//|                                                                  |
 //| 2026-03-21 重构 v5.0:                                            |
 //|   - 【Critical Fix 1】废除本地Tick轮询模拟挂单，改用原生挂单      |
 //|   - 【Critical Fix 2】废除文件I/O持仓状态，改为无状态计算         |
@@ -14,7 +23,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, XAUUSD Dual Strategy"
 #property link      ""
-#property version   "5.00"
+#property version   "5.10"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -83,10 +92,14 @@ input double InpDailyMaxDrawdownPct = 3.0;    // 每日最大亏损百分比
 input double InpInitialCapital = 10000.0;     // 初始资金 (用于熔断计算)
 
 // 交易设置
-input double InpLotSize = 1.0;           // 交易手数
+input double InpLotSize = 1.0;           // 交易手数 (动态仓位时作为最大限制)
 input int    InpSlippage = 30;           // 滑点 (点)
 input int    InpMagicNumber = 20260101;  // 魔术数字
 input string InpTradeComment = "XAUUSD_DualStrategy";  // 交易注释
+
+// 【任务2 新增】动态仓位参数
+input bool   InpUseDynamicLot = true;    // 启用动态仓位 (风险百分比法)
+input double InpRiskPercent = 2.0;       // 单笔交易风险百分比 (1-5%)
 
 // 策略开关
 input bool   InpEnableStrategyA = true;  // 启用策略A
@@ -472,7 +485,7 @@ void OnTick()
 
    // 判断是否有持仓（用于入场信号判断）
    bool hasPosition = (positionCount > 0);
-   else
+   if(!hasPosition)
    {
       // 无持仓时检查入场信号 (只在 newBar 时检测新信号)
       if(newBar)
@@ -1024,11 +1037,14 @@ int SendBuyStopOrder(double triggerPrice, double stopLoss, double takeProfit)
       return -1;
    }
 
+   // 【任务2 新增】动态仓位计算 (使用触发价作为预估入场价)
+   double lotSize = CalculateDynamicLotSize(triggerPrice, stopLoss);
+
    // 发送挂单
    int ticket = OrderSend(
       Symbol(),
       OP_BUYSTOP,
-      InpLotSize,
+      lotSize,
       triggerPrice,
       InpSlippage,
       stopLoss,
@@ -1043,6 +1059,11 @@ int SendBuyStopOrder(double triggerPrice, double stopLoss, double takeProfit)
    {
       int error = GetLastError();
       Print("【挂单失败】BuyStop, 错误码: ", error, " 描述: ", ErrorDescription(error));
+   }
+   else
+   {
+      Print("【挂单成功】BuyStop Ticket: ", ticket, " 手数: ", DoubleToString(lotSize, 2),
+            " 触发价: ", triggerPrice, " 止损: ", stopLoss);
    }
 
    return ticket;
@@ -1083,10 +1104,13 @@ int SendSellStopOrder(double triggerPrice, double stopLoss, double takeProfit)
       return -1;
    }
 
+   // 【任务2 新增】动态仓位计算 (使用触发价作为预估入场价)
+   double lotSize = CalculateDynamicLotSize(triggerPrice, stopLoss);
+
    int ticket = OrderSend(
       Symbol(),
       OP_SELLSTOP,
-      InpLotSize,
+      lotSize,
       triggerPrice,
       InpSlippage,
       stopLoss,
@@ -1102,8 +1126,100 @@ int SendSellStopOrder(double triggerPrice, double stopLoss, double takeProfit)
       int error = GetLastError();
       Print("【挂单失败】SellStop, 错误码: ", error, " 描述: ", ErrorDescription(error));
    }
+   else
+   {
+      Print("【挂单成功】SellStop Ticket: ", ticket, " 手数: ", DoubleToString(lotSize, 2),
+            " 触发价: ", triggerPrice, " 止损: ", stopLoss);
+   }
 
    return ticket;
+}
+
+//+------------------------------------------------------------------+
+//| 【任务2 新增】动态仓位计算函数 (风险百分比法)                      |
+//|                                                                   |
+//| 计算逻辑:                                                         |
+//| 1. 计算入场价与止损价之间的点差距离                               |
+//| 2. 风险金额 = AccountEquity() * (InpRiskPercent / 100.0)         |
+//| 3. 使用 MarketInfo 获取 TICKVALUE、MINLOT、MAXLOT 进行规范化      |
+//|                                                                   |
+//| 返回值:                                                           |
+//|   - 计算后的规范化手数                                            |
+//|   - 如果无法计算或止损无效，返回 InpLotSize                       |
+//+------------------------------------------------------------------+
+double CalculateDynamicLotSize(double entryPrice, double stopLoss)
+{
+   // 如果未启用动态仓位，返回默认手数
+   if(!InpUseDynamicLot)
+   {
+      return InpLotSize;
+   }
+
+   // 验证止损有效性
+   if(stopLoss <= 0 || entryPrice <= 0)
+   {
+      Print("【动态仓位】止损或入场价无效，使用默认手数: ", InpLotSize);
+      return InpLotSize;
+   }
+
+   // 获取市场信息
+   double tickValue = MarketInfo(Symbol(), MODE_TICKVALUE);
+   double tickSize  = MarketInfo(Symbol(), MODE_TICKSIZE);
+   double minLot    = MarketInfo(Symbol(), MODE_MINLOT);
+   double maxLot    = MarketInfo(Symbol(), MODE_MAXLOT);
+   double lotStep   = MarketInfo(Symbol(), MODE_LOTSTEP);
+
+   // 验证市场信息有效性
+   if(tickValue <= 0 || tickSize <= 0 || minLot <= 0 || maxLot <= 0)
+   {
+      Print("【动态仓位】市场信息无效，使用默认手数: ", InpLotSize);
+      return InpLotSize;
+   }
+
+   // 计算止损点数 (使用 Point 转换)
+   double stopLossPoints = MathAbs(entryPrice - stopLoss) / Point;
+
+   if(stopLossPoints <= 0)
+   {
+      Print("【动态仓位】止损点数为零，使用默认手数: ", InpLotSize);
+      return InpLotSize;
+   }
+
+   // 计算风险金额
+   double accountEquity = AccountEquity();
+   double riskAmount = accountEquity * (InpRiskPercent / 100.0);
+
+   // 计算每点价值 (XAUUSD 通常 Point = 0.01, TickSize = 0.01, TickValue = 0.1)
+   // 每手每点价值 = TickValue * (Point / TickSize)
+   double pointValuePerLot = tickValue * (Point / tickSize);
+
+   if(pointValuePerLot <= 0)
+   {
+      Print("【动态仓位】点值计算失败，使用默认手数: ", InpLotSize);
+      return InpLotSize;
+   }
+
+   // 计算手数: 手数 = 风险金额 / (止损点数 * 每点价值)
+   double lotSize = riskAmount / (stopLossPoints * pointValuePerLot);
+
+   // 规范化手数 (按 lotStep 取整)
+   if(lotStep > 0)
+   {
+      lotSize = MathFloor(lotSize / lotStep) * lotStep;
+   }
+
+   // 限制在 MINLOT 和 MAXLOT 范围内
+   lotSize = MathMax(minLot, MathMin(maxLot, lotSize));
+
+   // 限制不超过 InpLotSize (作为最大手数限制)
+   lotSize = MathMin(lotSize, InpLotSize);
+
+   Print("【动态仓位】计算结果: 权益=$", DoubleToString(accountEquity, 2),
+         " 风险=", DoubleToString(InpRiskPercent, 1), "%=$", DoubleToString(riskAmount, 2),
+         " 止损点数=", DoubleToString(stopLossPoints, 1),
+         " 手数=", DoubleToString(lotSize, 2));
+
+   return lotSize;
 }
 
 //+------------------------------------------------------------------+
@@ -1153,6 +1269,9 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
    sl = NormalizeDouble(sl, digits);
    if(tp > 0) tp = NormalizeDouble(tp, digits);
 
+   // 【任务2 新增】动态仓位计算
+   double lotSize = CalculateDynamicLotSize(price, sl);
+
    int maxRetries = 3;
    int ticket = -1;
 
@@ -1161,7 +1280,7 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
       ticket = OrderSend(
          Symbol(),
          orderType,
-         InpLotSize,
+         lotSize,
          price,
          InpSlippage,
          sl,
@@ -1205,7 +1324,8 @@ bool OpenPositionMQL4(int orderType, double sl, double tp, string strategy)
    }
 
    Print("【下单成功】Ticket: ", ticket, " 类型: ", (orderType == OP_BUY ? "BUY" : "SELL"),
-         " 价格: ", price, " 止损: ", sl, " 止盈: ", tp);
+         " 价格: ", price, " 手数: ", DoubleToString(lotSize, 2),
+         " 止损: ", sl, " 止盈: ", tp);
 
    return true;
 }
@@ -1348,7 +1468,7 @@ void CheckExitConditions(int positionTicket, int positionType, double positionSL
 
    if(shouldClose)
    {
-      ClosePositionMQL4(reason);
+      ClosePositionMQL4(positionTicket, reason);
    }
 }
 
@@ -1556,8 +1676,9 @@ void CloseAllPositions(string reason)
             int orderType = OrderType();
             if(orderType == OP_BUY || orderType == OP_SELL)
             {
-               Print("【强制平仓】原因: ", reason, " 订单 #", OrderTicket());
-               ClosePositionMQL4(reason);
+               int ticket = OrderTicket();
+               Print("【强制平仓】原因: ", reason, " 订单 #", ticket);
+               ClosePositionMQL4(ticket, reason);
             }
          }
       }
@@ -1592,88 +1713,101 @@ void DeleteAllPendingOrders()
 }
 
 //+------------------------------------------------------------------+
-//| MQL4 原生平仓函数                                                 |
+//| 【任务1 修复】MQL4 原生平仓函数                                   |
+//|                                                                   |
+//| 修复内容:                                                         |
+//|   - 接收指定订单号 ticket，直接操作目标订单                      |
+//|   - 移除 for 循环遍历，避免"张冠李戴"平错订单                    |
+//|                                                                   |
+//| 参数:                                                             |
+//|   ticket - 要平仓的订单号                                         |
+//|   reason - 平仓原因 (用于日志记录)                               |
 //+------------------------------------------------------------------+
-bool ClosePositionMQL4(string reason)
+bool ClosePositionMQL4(int ticket, string reason)
 {
-   int totalOrders = OrdersTotal();
-
-   for(int i = totalOrders - 1; i >= 0; i--)
+   // 直接选中指定订单
+   if(!OrderSelect(ticket, SELECT_BY_TICKET))
    {
-      if(OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+      Print("【平仓失败】无法选中订单 Ticket: ", ticket, " 错误: ", GetLastError());
+      return false;
+   }
+
+   // 验证订单属于当前品种和魔术数字
+   if(OrderSymbol() != Symbol() || OrderMagicNumber() != InpMagicNumber)
+   {
+      Print("【平仓拒绝】订单不属于当前策略 Ticket: ", ticket,
+            " Symbol: ", OrderSymbol(), " Magic: ", OrderMagicNumber());
+      return false;
+   }
+
+   int orderType = OrderType();
+   double lots = OrderLots();
+
+   // 只处理持仓订单
+   if(orderType != OP_BUY && orderType != OP_SELL)
+   {
+      Print("【平仓拒绝】非持仓订单 Ticket: ", ticket, " 类型: ", orderType);
+      return false;
+   }
+
+   double closePrice;
+   color arrowColor;
+
+   if(orderType == OP_BUY)
+   {
+      closePrice = Bid;
+      arrowColor = clrRed;
+   }
+   else
+   {
+      closePrice = Ask;
+      arrowColor = clrBlue;
+   }
+
+   int digits = (int)MarketInfo(Symbol(), MODE_DIGITS);
+   closePrice = NormalizeDouble(closePrice, digits);
+
+   int maxRetries = 3;
+   bool closeResult = false;
+
+   for(int retry = 0; retry < maxRetries; retry++)
+   {
+      closeResult = OrderClose(ticket, lots, closePrice, InpSlippage, arrowColor);
+
+      if(closeResult == true)
       {
-         if(OrderSymbol() == Symbol() && OrderMagicNumber() == InpMagicNumber)
-         {
-            int orderType = OrderType();
-            double lots = OrderLots();
-            int ticket = OrderTicket();
+         break;
+      }
 
-            if(orderType != OP_BUY && orderType != OP_SELL)
-               continue;
+      int error = GetLastError();
 
-            double closePrice;
-            color arrowColor;
+      if(error == 138 || error == 146)
+      {
+         Print("【平仓重试】错误码: ", error, " 重试次数: ", retry + 1);
+         Sleep(100);
+         RefreshRates();
 
-            if(orderType == OP_BUY)
-            {
-               closePrice = Bid;
-               arrowColor = clrRed;
-            }
-            else
-            {
-               closePrice = Ask;
-               arrowColor = clrBlue;
-            }
-
-            int digits = (int)MarketInfo(Symbol(), MODE_DIGITS);
-            closePrice = NormalizeDouble(closePrice, digits);
-
-            int maxRetries = 3;
-            bool closeResult = false;
-
-            for(int retry = 0; retry < maxRetries; retry++)
-            {
-               closeResult = OrderClose(ticket, lots, closePrice, InpSlippage, arrowColor);
-
-               if(closeResult == true)
-               {
-                  break;
-               }
-
-               int error = GetLastError();
-
-               if(error == 138 || error == 146)
-               {
-                  Print("【平仓重试】错误码: ", error, " 重试次数: ", retry + 1);
-                  Sleep(100);
-                  RefreshRates();
-
-                  if(orderType == OP_BUY)
-                     closePrice = NormalizeDouble(Bid, digits);
-                  else
-                     closePrice = NormalizeDouble(Ask, digits);
-               }
-               else
-               {
-                  Print("【平仓失败】错误码: ", error);
-                  return false;
-               }
-            }
-
-            if(closeResult == false)
-            {
-               int error = GetLastError();
-               Print("【平仓最终失败】错误码: ", error);
-               return false;
-            }
-
-            Print("【平仓成功】Ticket: ", ticket, " 原因: ", reason, " 价格: ", closePrice);
-            return true;
-         }
+         if(orderType == OP_BUY)
+            closePrice = NormalizeDouble(Bid, digits);
+         else
+            closePrice = NormalizeDouble(Ask, digits);
+      }
+      else
+      {
+         Print("【平仓失败】错误码: ", error);
+         return false;
       }
    }
 
-   return false;
+   if(closeResult == false)
+   {
+      int error = GetLastError();
+      Print("【平仓最终失败】错误码: ", error);
+      return false;
+   }
+
+   Print("【平仓成功】Ticket: ", ticket, " 原因: ", reason, " 价格: ", closePrice);
+   return true;
 }
 
 //+------------------------------------------------------------------+

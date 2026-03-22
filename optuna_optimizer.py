@@ -528,9 +528,21 @@ def calculate_custom_fitness(
         fitness += (profit_factor - 1.5) * 10
 
     # 极端情况处理
-    if total_trades < 5:
-        # 交易次数过少，返回负值但保持平滑
-        fitness = -100 * (1 - total_trades / 5)
+    # 【优化】加强对低交易次数的惩罚
+    # 原逻辑：<5笔才惩罚，改为：低于min_trades/4就开始惩罚
+    min_trade_threshold = min_trades // 4  # 例如 min_trades=100，则阈值为25
+    if total_trades < min_trade_threshold:
+        # 交易次数过少，给予重惩罚
+        # 惩罚强度与距离阈值的差距成正比
+        trade_deficit_ratio = 1 - (total_trades / min_trade_threshold)
+        fitness = -200 * trade_deficit_ratio  # 更强的惩罚
+        if verbose:
+            print(f"  [交易次数惩罚] 仅{total_trades}笔交易（阈值{min_trade_threshold}），惩罚: {fitness:.2f}")
+    elif total_trades < min_trades // 2:
+        # 交易次数仍然偏少，给予中等惩罚
+        fitness *= 0.5  # 适应度减半
+        if verbose:
+            print(f"  [交易次数警告] {total_trades}笔交易（建议>{min_trades//2}），适应度减半")
 
     if verbose:
         print(f"  Return: {total_return:.2f}%, DD: {max_drawdown:.1f}%, "

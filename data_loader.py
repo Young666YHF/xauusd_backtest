@@ -73,22 +73,187 @@ def validate_and_convert_timezone(df: pd.DataFrame, expected_tz = None) -> pd.Da
     return df
 
 
-def load_tick_data_from_csv(
-    csv_path: str,
-    assume_timezone: Optional[str] = None
+# =============================================================================
+# 【Critical Fix 6】Dukascopy 数据专用加载函数
+# =============================================================================
+
+
+def load_dukascopy_tick_data(
+    filepath: str,
+    keep_utc: bool = True
 ) -> pd.DataFrame:
     """
-    从CSV文件加载tick数据
+    【Critical Fix 6】专门用于加载 Dukascopy 导出的 Tick 数据
+
+    Dukascopy 数据特点：
+    - 时间戳为 UTC 时间
+    - 列名可能是 'Gmt time', 'Ask', 'Bid', 'AskVolume', 'BidVolume'
+    - 或者无表头格式：timestamp, ask, bid, ask_volume, bid_volume
+
+    核心修复：
+    - 强制注入 UTC 时区标签
+    - 确保 indicators.py 中的时段过滤器正确工作
+
+    Args:
+        filepath: CSV 文件路径
+        keep_utc: 是否保持 UTC 时区（推荐 True，避免双重转换）
+
+    Returns:
+        DataFrame with columns: ['bid', 'ask', 'price', 'ask_volume', 'bid_volume']
+        索引为带时区的 datetime
+    """
+    print(f"正在加载 Dukascopy 数据: {filepath} ...")
+
+    # 1. 尝试读取带表头的数据
+    try:
+        df = pd.read_csv(filepath, nrows=1)
+        has_header = 'Gmt' in df.columns[0] or 'time' in df.columns[0].lower() or 'ask' in df.columns[0].lower()
+    except:
+        has_header = False
+
+    if not has_header:
+        # 无表头格式：timestamp, ask, bid, ask_volume, bid_volume
+        df = pd.read_csv(
+            filepath,
+            header=None,
+            names=['timestamp', 'ask', 'bid', 'ask_volume', 'bid_volume']
+        )
+    else:
+        # 有表头格式
+        df = pd.read_csv(filepath)
+
+    # 2. 解析时间列
+    time_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if 'gmt' in col_lower or 'time' in col_lower:
+            time_col = col
+            break
+
+    if time_col is None:
+        # 使用第一列作为时间列
+        time_col = df.columns[0]
+
+    df['timestamp'] = pd.to_datetime(df[time_col])
+
+    # 如果时间列不是索引，删除原始时间列
+    if time_col != 'timestamp':
+        df.drop(columns=[time_col], inplace=True)
+
+    # 设置时间索引
+    df.set_index('timestamp', inplace=True)
+
+    # 3. 【生死线】强制赋予 UTC 时区
+    if df.index.tz is None:
+        df.index = df.index.tz_localize('UTC')
+        print(f"  ✅ 时区已标注为 UTC")
+    else:
+        df.index = df.index.tz_convert('UTC')
+        print(f"  ✅ 时区已转换为 UTC")
+
+    # 4. 适配列名（统一转为小写）
+    rename_map = {}
+    volume_cols = []
+
+    for col in df.columns:
+        col_lower = col.lower()
+        if col_lower in ['ask', 'a']:
+            rename_map[col] = 'ask'
+        elif col_lower in ['bid', 'b']:
+            rename_map[col] = 'bid'
+        elif 'ask' in col_lower and 'vol' in col_lower:
+            rename_map[col] = 'ask_volume'
+            volume_cols.append('ask_volume')
+        elif 'bid' in col_lower and 'vol' in col_lower:
+            rename_map[col] = 'bid_volume'
+            volume_cols.append('bid_volume')
+        elif col_lower in ['askvolume', 'avolume']:
+            rename_map[col] = 'ask_volume'
+            volume_cols.append('ask_volume')
+        elif col_lower in ['bidvolume', 'bvolume']:
+            rename_map[col] = 'bid_volume'
+            volume_cols.append('bid_volume')
+
+    df.rename(columns=rename_map, inplace=True)
+
+    # 5. 确保必要列存在
+    if 'ask' not in df.columns or 'bid' not in df.columns:
+        raise ValueError(f"数据缺少 ask/bid 列！当前列: {df.columns.tolist()}")
+
+    # 6. 生成辅助列
+    df['price'] = (df['ask'] + df['bid']) / 2
+
+    # 处理成交量
+    if 'ask_volume' not in df.columns or 'bid_volume' not in df.columns:
+        # 尝试从其他列名获取
+        for col in df.columns:
+            if 'vol' in col.lower():
+                if 'ask' in col.lower() and 'ask_volume' not in df.columns:
+                    df.rename(columns={col: 'ask_volume'}, inplace=True)
+                elif 'bid' in col.lower() and 'bid_volume' not in df.columns:
+                    df.rename(columns={col: 'bid_volume'}, inplace=True)
+
+        # 如果还是没有，设置默认值
+        if 'ask_volume' not in df.columns:
+            df['ask_volume'] = 1.0
+        if 'bid_volume' not in df.columns:
+            df['bid_volume'] = 1.0
+
+    # 7. 清理多余列，只保留必要列
+    keep_cols = ['bid', 'ask', 'price', 'ask_volume', 'bid_volume']
+    df = df[[c for c in keep_cols if c in df.columns]]
+
+    # 8. 时区处理策略
+    if not keep_utc:
+        # 转换为北京时间（兼容旧代码）
+        df = validate_and_convert_timezone(df, BEIJING_TZ)
+    else:
+        # 保持 UTC，让 indicators.py 统一处理
+        print(f"  ℹ️ 保持 UTC 时区，indicators.py 将统一处理时段判定")
+
+    print(f"  加载成功！记录数: {len(df):,}, 时区: {df.index.tz}")
+
+    return df
+
+
+def load_tick_data_from_csv(
+    csv_path: str,
+    assume_timezone: Optional[str] = None,
+    source: str = 'auto'
+) -> pd.DataFrame:
+    """
+    从CSV文件加载tick数据（智能检测格式）
+
+    【Critical Fix 6】新增 source 参数，支持自动检测 Dukascopy 格式
 
     数据格式: timestamp, ask, bid, ask_volume, bid_volume
 
     Args:
         csv_path: CSV文件路径
         assume_timezone: 假设的原始时区 (None表示自动推断UTC+0)
+        source: 数据源类型 ('auto', 'dukascopy', 'generic')
 
     Returns:
         DataFrame with columns: [timestamp, ask, bid, ask_volume, bid_volume]
     """
+    # 自动检测数据源类型
+    if source == 'auto':
+        try:
+            with open(csv_path, 'r') as f:
+                first_line = f.readline()
+                # Dukascopy 数据通常包含 Gmt time 或特定格式
+                if 'Gmt' in first_line or 'gmt' in first_line.lower():
+                    source = 'dukascopy'
+                else:
+                    source = 'generic'
+        except:
+            source = 'generic'
+
+    if source == 'dukascopy':
+        # 使用专门的 Dukascopy 加载器，保持 UTC 时区
+        return load_dukascopy_tick_data(csv_path, keep_utc=True)
+
+    # 通用格式加载
     df = pd.read_csv(
         csv_path,
         header=None,
@@ -98,18 +263,20 @@ def load_tick_data_from_csv(
     # 解析时间戳
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    # 【修复2.1】时区处理
+    # 【Critical Fix 6】时区处理 - 默认标注为 UTC
     if assume_timezone:
         df['timestamp'] = df['timestamp'].dt.tz_localize(assume_timezone)
     elif df['timestamp'].dt.tz is None:
-        # 假设原始数据为 UTC+0
-        df['timestamp'] = df['timestamp'].dt.tz_localize(UTC_TZ)
+        # 默认假设原始数据为 UTC
+        df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')
 
     # 设置时间索引
     df.set_index('timestamp', inplace=True)
 
-    # 转换为北京时间
-    df = validate_and_convert_timezone(df, BEIJING_TZ)
+    # 【Critical Fix 6】不再自动转换为北京时间
+    # 让 indicators.py 统一处理时区转换，避免双重转换问题
+    # 注释掉原来的转换逻辑
+    # df = validate_and_convert_timezone(df, BEIJING_TZ)
 
     # 计算中间价格
     df['price'] = (df['ask'] + df['bid']) / 2
@@ -121,14 +288,17 @@ def ticks_to_ohlcv(df: pd.DataFrame, interval: str = '15min') -> pd.DataFrame:
     """
     将tick数据聚合成OHLCV数据
 
+    【Critical Fix 6】保持原始时区，不进行转换
+
     Args:
         df: tick数据DataFrame (包含 'price', 'ask_volume', 'bid_volume' 列)
         interval: 聚合周期 (15T=15分钟, 1H=1小时, 1D=1天)
 
     Returns:
-        OHLCV DataFrame
+        OHLCV DataFrame (保持原始时区)
     """
     # 计算成交量（使用ask_volume + bid_volume的平均值）
+    df = df.copy()
     df['volume'] = (df['ask_volume'] + df['bid_volume']) / 2
 
     # 按时间周期聚合
@@ -144,6 +314,12 @@ def ticks_to_ohlcv(df: pd.DataFrame, interval: str = '15min') -> pd.DataFrame:
 
     # 删除缺失值
     ohlcv = ohlcv.dropna()
+
+    # 【Critical Fix 6】保持原始时区，打印时区信息
+    if ohlcv.index.tz is not None:
+        print(f"  K线数据时区: {ohlcv.index.tz}")
+    else:
+        print(f"  ⚠️ K线数据无时区信息")
 
     return ohlcv
 
