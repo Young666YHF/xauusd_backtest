@@ -5,14 +5,14 @@
 //|   策略A - 均值回归 (亚盘 06:00-14:00 北京时间)                    |
 //|   策略B - 动量突破 (欧美盘 15:00-00:00 北京时间)                  |
 //|                                                                  |
+//| 2026-03-22 更新 v5.2 - 核心逻辑缺陷修复:                         |
+//|   - 【修复1】并发持仓逻辑: 策略A和策略B独立追踪持仓，允许同时开仓 |
+//|   - 【修复4】动态手数: NormalizeDouble防止浮点截断Error 131      |
+//|   - 【修复5】VWAP时区: EST时间锚定确保美东17:00重置              |
+//|                                                                  |
 //| 2026-03-22 更新 v5.1:                                            |
 //|   - 【任务1 Critical】修复平仓函数"张冠李戴"Bug                   |
-//|     - ClosePositionMQL4 改为接收 ticket 参数                     |
-//|     - 移除 for 循环遍历，直接操作指定订单                         |
 //|   - 【任务2】引入动态仓位计算 (风险百分比法)                      |
-//|     - 新增参数 InpUseDynamicLot, InpRiskPercent                  |
-//|     - 新增函数 CalculateDynamicLotSize                           |
-//|     - 下单前自动计算手数，限制在 MINLOT/MAXLOT 范围              |
 //|                                                                  |
 //| 2026-03-21 重构 v5.0:                                            |
 //|   - 【Critical Fix 1】废除本地Tick轮询模拟挂单，改用原生挂单      |
@@ -23,7 +23,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, XAUUSD Dual Strategy"
 #property link      ""
-#property version   "5.10"
+#property version   "5.20"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -417,14 +417,19 @@ void OnTick()
    // ═══════════════════════════════════════════════════════════════════
    // 【Critical Fix 2】持仓检查 - 实时遍历订单 (无状态)
    // ═══════════════════════════════════════════════════════════════════
-   // 【Critical Fix 9】支持多订单并发处理
-   // 定义数组存储所有持仓信息，支持策略 A 和策略 B 并发
+   // 【修复1】支持策略A和策略B并发持仓
+   // 分别计算每个策略是否有持仓，允许双策略同时开仓
    int positionTickets[MAX_TRAILING_STOP_TRACKERS];
    int positionTypes[MAX_TRAILING_STOP_TRACKERS];
    double positionSLs[MAX_TRAILING_STOP_TRACKERS];
    double positionOpenPrices[MAX_TRAILING_STOP_TRACKERS];
    datetime positionOpenTimes[MAX_TRAILING_STOP_TRACKERS];
+   string positionStrategies[MAX_TRAILING_STOP_TRACKERS];  // 新增：记录每个订单所属策略
    int positionCount = 0;
+
+   // 【修复1】分别追踪策略A和策略B的持仓状态
+   bool hasPositionA = false;
+   bool hasPositionB = false;
 
    int totalOrders = OrdersTotal();
 
@@ -446,6 +451,25 @@ void OnTick()
                   positionSLs[positionCount] = OrderStopLoss();
                   positionOpenPrices[positionCount] = OrderOpenPrice();
                   positionOpenTimes[positionCount] = OrderOpenTime();
+
+                  // 【修复1】从订单注释识别所属策略
+                  string orderComment = OrderComment();
+                  if(StringFind(orderComment, "_A") >= 0)
+                  {
+                     positionStrategies[positionCount] = "A";
+                     hasPositionA = true;
+                  }
+                  else if(StringFind(orderComment, "_B") >= 0)
+                  {
+                     positionStrategies[positionCount] = "B";
+                     hasPositionB = true;
+                  }
+                  else
+                  {
+                     positionStrategies[positionCount] = "A";  // 默认归属策略A
+                     hasPositionA = true;
+                  }
+
                   positionCount++;
                }
                // 【Critical Fix 9】移除 break; 遍历所有订单，支持多策略并发
@@ -483,25 +507,34 @@ void OnTick()
                           atr, vwap, barsHeld, highestPrice, lowestPrice);
    }
 
-   // 判断是否有持仓（用于入场信号判断）
-   bool hasPosition = (positionCount > 0);
-   if(!hasPosition)
+   // 【修复1】策略A和策略B独立入场判定
+   // 策略A：仅当策略A无持仓时检查入场信号
+   if(!hasPositionA)
    {
-      // 无持仓时检查入场信号 (只在 newBar 时检测新信号)
       if(newBar)
       {
-         // 【Critical Fix 1】使用 index 1 (已收盘K线) 的价格，绝不用 index 0
          double close1 = iClose(NULL, PERIOD_M15, 1);
          double high1 = iHigh(NULL, PERIOD_M15, 1);
          double low1 = iLow(NULL, PERIOD_M15, 1);
 
-         // 策略A检查 - 均值回归
+         // 策略A检查 - 均值回归 (仅亚盘)
          if(InpEnableStrategyA && isAsian)
          {
             CheckStrategyAEntry(close1, bbUpper, bbLower, rsi, atr, high1, low1);
          }
+      }
+   }
 
-         // 策略B检查 - 动量突破
+   // 策略B：仅当策略B无持仓时检查入场信号
+   if(!hasPositionB)
+   {
+      if(newBar)
+      {
+         double close1 = iClose(NULL, PERIOD_M15, 1);
+         double high1 = iHigh(NULL, PERIOD_M15, 1);
+         double low1 = iLow(NULL, PERIOD_M15, 1);
+
+         // 策略B检查 - 动量突破 (仅欧美盘)
          if(InpEnableStrategyB && isEuropean && g_pendingOrderTicket == 0)
          {
             CheckStrategyBEntry(close1, bbUpper, bbLower, bbMiddle,
@@ -687,43 +720,67 @@ double GetDailyVWAP()
 
 
 //+------------------------------------------------------------------+
-//| 【Critical Fix 9】计算外汇交易日 - 简化版                         |
+//| 【修复5】计算外汇交易日 - EST时区锚定                             |
 //|                                                                   |
 //| 核心原则：                                                        |
-//| 正规券商服务器 00:00 已严格对齐美东 17:00 闭盘时间               |
-//| 因此无需将时间转换为北京时间再分割，直接使用服务器时间即可       |
+//| 外汇市场日线重置于美东时间 17:00 (EST/EDT)                       |
+//| VWAP 必须在同一交易日内计算，严禁跨日                             |
 //|                                                                   |
-//| 外汇交易日从美东时间 17:00 开始，到次日 17:00 结束               |
-//| 服务器 00:00 = 美东 17:00 = 外汇交易日分界点                     |
+//| 时区转换：                                                        |
+//| - 服务器时间 -> UTC -> EST/EDT                                   |
+//| - 使用 g_detectedDSTOffset 判断当前是否夏令时                    |
+//| - EST = UTC-5, EDT = UTC-4                                        |
 //+------------------------------------------------------------------+
 int GetForexTradingDay(datetime barTime)
 {
    // ═══════════════════════════════════════════════════════════════════════
-   // 【Critical Fix 9】简化时区逻辑
+   // 【修复5】将服务器时间转换为 EST 时间后再计算 DayOfYear
    //
-   // 券商服务器时间 00:00 已经对齐美东 17:00（外汇市场日线重置）
-   // 因此可以直接使用 TimeDayOfYear 判断交易日，无需复杂转换
+   // 确保在任何 UTC 偏移的券商下，VWAP 都严格在美东 17:00 重置
    // ═══════════════════════════════════════════════════════════════════════
 
-   // 使用年份和年积日唯一标识外汇交易日
-   int year = TimeYear(barTime);
-   int dayOfYear = TimeDayOfYear(barTime);
-
-   // 服务器时间的小时部分
+   // 服务器时间的小时和分钟
    int serverHour = TimeHour(barTime);
+   int serverMinute = TimeMinute(barTime);
 
-   // ═══════════════════════════════════════════════════════════════════════
-   // 关键判断：服务器时间 00:00-23:59 为一个外汇交易日
-   //
-   // 由于正规券商服务器 00:00 = 美东 17:00
-   // 所以服务器时间的"日"天然就是"外汇交易日"
-   //
-   // 例如：
-   // - 服务器 2026-03-21 00:00 - 23:59 = 外汇交易日 2026-03-21
-   // - 这对应美东 17:00 (2026-03-20) - 17:00 (2026-03-21)
-   // ═══════════════════════════════════════════════════════════════════════
+   // 转换为 UTC：服务器时间 - g_detectedDSTOffset
+   int utcHour = serverHour - g_detectedDSTOffset;
 
-   // 直接返回年份和年积日的组合
+   // 转换为 EST：UTC - 5 (夏令时为 UTC - 4，即 EDT)
+   int isDST = (g_detectedDSTOffset == 3) ? 1 : 0;  // 夏令时检测
+   int estOffset = 5 - isDST;  // EST = UTC-5, EDT = UTC-4
+   int estHour = utcHour - estOffset;
+
+   // 处理跨日
+   datetime estDate = barTime;
+
+   // 如果 EST 小时为负数，说明是前一天的日期
+   if(estHour < 0)
+   {
+      estDate = barTime - 86400;  // 减去一天
+      estHour += 24;
+   }
+   else if(estHour >= 24)
+   {
+      estDate = barTime + 86400;  // 加一天
+      estHour -= 24;
+   }
+
+   // 外汇交易日的分界点是美东 17:00
+   // 如果当前 EST 时间 < 17:00，则属于前一天的交易时段
+   int estTotalMinutes = estHour * 60 + serverMinute;
+
+   if(estTotalMinutes < 17 * 60)  // 17:00 之前
+   {
+      // 属于前一天的交易时段，日期减 1
+      estDate = estDate - 86400;
+   }
+
+   // 使用转换后的 EST 日期计算 DayOfYear
+   int year = TimeYear(estDate);
+   int dayOfYear = TimeDayOfYear(estDate);
+
+   // 返回年份和年积日的组合，唯一标识外汇交易日
    return year * 1000 + dayOfYear;
 }
 
@@ -1202,10 +1259,11 @@ double CalculateDynamicLotSize(double entryPrice, double stopLoss)
    // 计算手数: 手数 = 风险金额 / (止损点数 * 每点价值)
    double lotSize = riskAmount / (stopLossPoints * pointValuePerLot);
 
-   // 规范化手数 (按 lotStep 取整)
+   // 【修复4】规范化手数 - 防止浮点数截断导致 Error 131
+   // 使用 NormalizeDouble + 微小偏移避免浮点精度问题
    if(lotStep > 0)
    {
-      lotSize = MathFloor(lotSize / lotStep) * lotStep;
+      lotSize = NormalizeDouble(MathFloor(lotSize / lotStep + 0.00001) * lotStep, 2);
    }
 
    // 限制在 MINLOT 和 MAXLOT 范围内

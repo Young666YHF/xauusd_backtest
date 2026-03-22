@@ -1,6 +1,10 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
 // Copyright © 2026 XAUUSD Dual Strategy
 //
+// 2026-03-22 v5.2 核心逻辑缺陷修复:
+// - 【修复1】并发持仓: 策略A和策略B独立状态追踪，允许同时开仓
+// - 【修复3】Stop Order: 移除未来函数延迟，直接使用stop参数让撮合引擎处理
+//
 // 2026-03-21 v5.0 Critical Fixes:
 // - 增加每日熔断机制 (Daily Circuit Breaker)
 // - DST 动态感知 (Asia/Shanghai 时区)
@@ -124,16 +128,24 @@ is_asian_session = (current_hour >= asian_start) and (current_hour < asian_end)
 is_european_session = (current_hour >= european_start) or (current_hour < european_end)
 
 // ============================================
-// 策略状态变量
+// 【修复1】策略状态变量 - 策略A和策略B独立追踪
 // ============================================
 
-var string current_strategy = ""
-var int bars_held = 0
-var float entry_price = 0.0
-var float fixed_stop_loss = 0.0
-var float avg_atr_at_entry = 0.0
-var float highest_since_entry = 0.0
-var float lowest_since_entry = 1000000.0
+// 策略A状态变量
+var string strategy_a_state = ""  // "" | "LONG" | "SHORT"
+var int bars_held_a = 0
+var float entry_price_a = 0.0
+var float fixed_stop_loss_a = 0.0
+var float avg_atr_at_entry_a = 0.0
+
+// 策略B状态变量
+var string strategy_b_state = ""  // "" | "LONG" | "SHORT"
+var int bars_held_b = 0
+var float entry_price_b = 0.0
+var float fixed_stop_loss_b = 0.0
+var float highest_since_entry_b = 0.0
+var float lowest_since_entry_b = 1000000.0
+var float avg_atr_at_entry_b = 0.0
 
 // 策略B Stop Order 状态
 var bool pending_confirmation = false
@@ -210,99 +222,117 @@ calculate_dynamic_time_stop(entry_atr_val, avg_atr_val) =>
         int(base_bars)
 
 // ============================================
-// 持仓状态
+// 【修复1】持仓状态 - 策略A和策略B独立
 // ============================================
 
-has_position = strategy.position_size != 0
-is_long = strategy.position_size > 0
-is_short = strategy.position_size < 0
+has_position_a = strategy_a_state != ""
+has_position_b = strategy_b_state != ""
+is_long_a = strategy_a_state == "LONG"
+is_short_a = strategy_a_state == "SHORT"
+is_long_b = strategy_b_state == "LONG"
+is_short_b = strategy_b_state == "SHORT"
 
 // ============================================
 // 【Task 2.1 & 2.2】出场逻辑 (与Python Tick引擎对齐)
+// 【修复1】策略A和策略B独立出场
 // ============================================
 
-var bool should_close = false
-var string close_reason = ""
+// === 策略A出场 ===
+var bool should_close_a = false
+var string close_reason_a = ""
 
-if has_position
-    bars_held := bars_held + 1
-    highest_since_entry := math.max(highest_since_entry, high)
-    lowest_since_entry := math.min(lowest_since_entry, low)
+if has_position_a
+    bars_held_a := bars_held_a + 1
 
-    // === 策略A出场 ===
-    if current_strategy == "A"
-        if is_long
-            // 止损: 最低价触及止损
-            if low <= fixed_stop_loss
-                should_close := true
-                close_reason := "止损"
-            // 【Task 2.1 修复】VWAP止盈: 用high而非close (Intrabar模拟)
-            // 与Python对齐: tick_ask >= vwap 时触发
-            else if high >= vwap_val
-                should_close := true
-                close_reason := "VWAP止盈"
-        else if is_short
-            if high >= fixed_stop_loss
-                should_close := true
-                close_reason := "止损"
-            // 【Task 2.1 修复】VWAP止盈: 用low而非close
-            else if low <= vwap_val
-                should_close := true
-                close_reason := "VWAP止盈"
+    if is_long_a
+        // 止损: 最低价触及止损
+        if low <= fixed_stop_loss_a
+            should_close_a := true
+            close_reason_a := "A止损"
+        // VWAP止盈: 用high而非close (Intrabar模拟)
+        else if high >= vwap_val
+            should_close_a := true
+            close_reason_a := "A_VWAP止盈"
+    else if is_short_a
+        if high >= fixed_stop_loss_a
+            should_close_a := true
+            close_reason_a := "A止损"
+        else if low <= vwap_val
+            should_close_a := true
+            close_reason_a := "A_VWAP止盈"
 
-        // ATR自适应动态时间止损
-        if not should_close
-            dynamic_max_bars = calculate_dynamic_time_stop(atr, avg_atr_at_entry)
-            if bars_held >= dynamic_max_bars
-                should_close := true
-                close_reason := "ATR动态时间止损"
+    // ATR自适应动态时间止损
+    if not should_close_a
+        dynamic_max_bars = calculate_dynamic_time_stop(atr, avg_atr_at_entry_a)
+        if bars_held_a >= dynamic_max_bars
+            should_close_a := true
+            close_reason_a := "A_ATR动态时间止损"
 
-    // === 策略B出场 ===
-    if current_strategy == "B"
-        if is_long
-            if low <= fixed_stop_loss
-                should_close := true
-                close_reason := "初始止损"
-            // 【Task 2.2 修复】追踪止损使用当前实时ATR
-            // 与Python对齐: trailing_stop = highest - mult * current_atr
-            else
-                trailing_stop = highest_since_entry - trailing_stop_atr_mult * atr
-                if low <= trailing_stop and highest_since_entry > entry_price
-                    should_close := true
-                    close_reason := "追踪止损"
+// 执行策略A平仓
+if should_close_a
+    strategy.close("Long_A", comment=close_reason_a)
+    strategy.close("Short_A", comment=close_reason_a)
+    strategy_a_state := ""
+    bars_held_a := 0
+    entry_price_a := 0.0
+    fixed_stop_loss_a := 0.0
+    avg_atr_at_entry_a := 0.0
+    should_close_a := false
+    close_reason_a := ""
 
-        else if is_short
-            if high >= fixed_stop_loss
-                should_close := true
-                close_reason := "初始止损"
-            // 【Task 2.2 修复】追踪止损使用当前实时ATR
-            else
-                trailing_stop = lowest_since_entry + trailing_stop_atr_mult * atr
-                if high >= trailing_stop and lowest_since_entry < entry_price
-                    should_close := true
-                    close_reason := "追踪止损"
+// === 策略B出场 ===
+var bool should_close_b = false
+var string close_reason_b = ""
 
-    // 执行平仓
-    if should_close
-        strategy.close_all(comment=close_reason)
-        current_strategy := ""
-        bars_held := 0
-        entry_price := 0.0
-        fixed_stop_loss := 0.0
-        highest_since_entry := 0.0
-        lowest_since_entry := 1000000.0
-        should_close := false
-        close_reason := ""
+if has_position_b
+    bars_held_b := bars_held_b + 1
+    highest_since_entry_b := math.max(highest_since_entry_b, high)
+    lowest_since_entry_b := math.min(lowest_since_entry_b, low)
+
+    if is_long_b
+        if low <= fixed_stop_loss_b
+            should_close_b := true
+            close_reason_b := "B初始止损"
+        else
+            trailing_stop = highest_since_entry_b - trailing_stop_atr_mult * atr
+            if low <= trailing_stop and highest_since_entry_b > entry_price_b
+                should_close_b := true
+                close_reason_b := "B追踪止损"
+
+    else if is_short_b
+        if high >= fixed_stop_loss_b
+            should_close_b := true
+            close_reason_b := "B初始止损"
+        else
+            trailing_stop = lowest_since_entry_b + trailing_stop_atr_mult * atr
+            if high >= trailing_stop and lowest_since_entry_b < entry_price_b
+                should_close_b := true
+                close_reason_b := "B追踪止损"
+
+// 执行策略B平仓
+if should_close_b
+    strategy.close("Long_B", comment=close_reason_b)
+    strategy.close("Short_B", comment=close_reason_b)
+    strategy_b_state := ""
+    bars_held_b := 0
+    entry_price_b := 0.0
+    fixed_stop_loss_b := 0.0
+    highest_since_entry_b := 0.0
+    lowest_since_entry_b := 1000000.0
+    avg_atr_at_entry_b := 0.0
+    should_close_b := false
+    close_reason_b := ""
 
 // ============================================
-// 策略B Stop Order 入场 (与Python Tick引擎对齐)
+// 【修复3】策略B Stop Order 入场 - 移除未来函数延迟
+// 直接使用 stop order 让撮合引擎处理触价成交
 // ============================================
 
-if pending_confirmation and not has_position
+if pending_confirmation and not has_position_b
     confirmation_bars_left := confirmation_bars_left - 1
 
     if confirmation_bars_left < 0
-        // 【修复】挂单过期时，完整重置所有状态变量
+        // 挂单过期时，完整重置所有状态变量
         pending_confirmation := false
         pending_direction := 0
         pending_breakout_high := 0.0
@@ -310,62 +340,61 @@ if pending_confirmation and not has_position
         pending_atr := 0.0
         confirmation_bars_left := 0
 
-    // 多头: 价格突破高点时入场
+    // 【修复3】多头: 直接使用 stop order，删除 high > pending_breakout_high 判断
     if pending_direction == 1
-        // 【Task 2.3 修复】使用 stop order 对齐 Python
-        if high > pending_breakout_high
-            entry_price_b := pending_breakout_high
-            atr_stop = entry_price_b - stop_loss_atr_mult_b * pending_atr
-            stop_price = math.max(atr_stop, pending_prev_low)
+        entry_price_b := pending_breakout_high
+        atr_stop = entry_price_b - stop_loss_atr_mult_b * pending_atr
+        stop_price = math.max(atr_stop, pending_prev_low)
 
-            // 【关键对齐】使用 stop order 入场
-            strategy.entry("Long_B", strategy.long, stop=pending_breakout_high)
+        // 【修复3】直接调用 strategy.entry 带 stop 参数，让撮合引擎处理触价成交
+        strategy.entry("Long_B", strategy.long, stop=pending_breakout_high)
 
-            current_strategy := "B"
-            entry_price := entry_price_b
-            fixed_stop_loss := stop_price
-            bars_held := 0
-            highest_since_entry := high
-            lowest_since_entry := low
-            avg_atr_at_entry := avg_atr
+        strategy_b_state := "LONG"
+        entry_price_b := entry_price_b
+        fixed_stop_loss_b := stop_price
+        bars_held_b := 0
+        highest_since_entry_b := high
+        lowest_since_entry_b := low
+        avg_atr_at_entry_b := avg_atr
 
-            pending_confirmation := false
+        pending_confirmation := false
 
-    // 空头: 价格跌破低点时入场
+    // 【修复3】空头: 直接使用 stop order，删除 low < pending_breakout_low 判断
     else if pending_direction == -1
-        if low < pending_breakout_low
-            entry_price_b := pending_breakout_low
-            atr_stop = entry_price_b + stop_loss_atr_mult_b * pending_atr
-            stop_price = math.min(atr_stop, pending_prev_high)
+        entry_price_b := pending_breakout_low
+        atr_stop = entry_price_b + stop_loss_atr_mult_b * pending_atr
+        stop_price = math.min(atr_stop, pending_prev_high)
 
-            // 【关键对齐】使用 stop order 入场
-            strategy.entry("Short_B", strategy.short, stop=pending_breakout_low)
+        // 【修复3】直接调用 strategy.entry 带 stop 参数
+        strategy.entry("Short_B", strategy.short, stop=pending_breakout_low)
 
-            current_strategy := "B"
-            entry_price := entry_price_b
-            fixed_stop_loss := stop_price
-            bars_held := 0
-            highest_since_entry := high
-            lowest_since_entry := low
-            avg_atr_at_entry := avg_atr
+        strategy_b_state := "SHORT"
+        entry_price_b := entry_price_b
+        fixed_stop_loss_b := stop_price
+        bars_held_b := 0
+        highest_since_entry_b := high
+        lowest_since_entry_b := low
+        avg_atr_at_entry_b := avg_atr
 
-            pending_confirmation := false
+        pending_confirmation := false
 
 // ============================================
-// 入场信号 (增加熔断和新闻过滤检查)
+// 【修复1】入场信号 - 策略A和策略B独立判定
 // ============================================
 
 // 熔断触发或新闻暂停时，不产生新信号
 can_trade = not circuit_breaker_triggered and not is_trading_paused
 
-long_signal_a = enable_strategy_a and is_asian_session and (close <= bb_lower) and (rsi < rsi_oversold) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
-short_signal_a = enable_strategy_a and is_asian_session and (close >= bb_upper) and (rsi > rsi_overbought) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
+// 【修复1】策略A入场信号 - 仅检查策略A持仓
+long_signal_a = enable_strategy_a and is_asian_session and (close <= bb_lower) and (rsi < rsi_oversold) and not is_abnormal_volatility and not has_position_a and can_trade
+short_signal_a = enable_strategy_a and is_asian_session and (close >= bb_upper) and (rsi > rsi_overbought) and not is_abnormal_volatility and not has_position_a and can_trade
 
-long_signal_b_raw = enable_strategy_b and is_european_session and (close > bb_upper) and (bb_upper > kc_upper) and (ema_fast_val > ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
-short_signal_b_raw = enable_strategy_b and is_european_session and (close < bb_lower) and (bb_lower < kc_lower) and (ema_fast_val < ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position and not pending_confirmation and can_trade
+// 【修复1】策略B入场信号 - 仅检查策略B持仓
+long_signal_b_raw = enable_strategy_b and is_european_session and (close > bb_upper) and (bb_upper > kc_upper) and (ema_fast_val > ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position_b and not pending_confirmation and can_trade
+short_signal_b_raw = enable_strategy_b and is_european_session and (close < bb_lower) and (bb_lower < kc_lower) and (ema_fast_val < ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position_b and not pending_confirmation and can_trade
 
 // ============================================
-// 策略A入场执行
+// 【修复1】策略A入场执行 - 独立状态追踪
 // ============================================
 
 if long_signal_a
@@ -374,13 +403,11 @@ if long_signal_a
 
     strategy.entry("Long_A", strategy.long)
 
-    current_strategy := "A"
-    entry_price := close
-    fixed_stop_loss := stop_price
-    bars_held := 0
-    highest_since_entry := high
-    lowest_since_entry := low
-    avg_atr_at_entry := avg_atr
+    strategy_a_state := "LONG"
+    entry_price_a := close
+    fixed_stop_loss_a := stop_price
+    bars_held_a := 0
+    avg_atr_at_entry_a := avg_atr
 
 if short_signal_a
     sl_anchor = math.max(close, bb_upper)
@@ -388,16 +415,14 @@ if short_signal_a
 
     strategy.entry("Short_A", strategy.short)
 
-    current_strategy := "A"
-    entry_price := close
-    fixed_stop_loss := stop_price
-    bars_held := 0
-    highest_since_entry := high
-    lowest_since_entry := low
-    avg_atr_at_entry := avg_atr
+    strategy_a_state := "SHORT"
+    entry_price_a := close
+    fixed_stop_loss_a := stop_price
+    bars_held_a := 0
+    avg_atr_at_entry_a := avg_atr
 
 // ============================================
-// 策略B入场执行 (设置Stop Order状态)
+// 【修复1】策略B入场执行 - 独立状态追踪
 // ============================================
 
 if long_signal_b_raw

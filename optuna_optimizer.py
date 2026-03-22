@@ -57,23 +57,24 @@ OPTIMIZATION_BOUNDS_FULL = {
 
 # 简化版参数边界（推荐使用）
 # 关键优化参数：10个，n_trials建议 >= 300
+# 【2026-03-22 优化】放宽参数空间，提高交易频率
 OPTIMIZATION_BOUNDS = {
     # 基础指标参数（合并bb和kc周期）
-    'channel_period': (10, 25),      # bb_period = kc_period = channel_period
-    'bb_std': (1.8, 3.0),            # 布林带标准差
-    'kc_atr_mult': (1.5, 2.5),       # 肯特纳通道ATR倍数
-    'atr_period': (10, 18),          # ATR周期
-    'rsi_threshold': (20, 35),       # RSI阈值：oversold=threshold, overbought=100-threshold
+    'channel_period': (10, 20),      # bb_period = kc_period = channel_period（缩短周期）
+    'bb_std': (1.5, 2.5),            # 布林带标准差（降低，更易触发）
+    'kc_atr_mult': (1.2, 2.0),       # 肯特纳通道ATR倍数（降低，更易触发）
+    'atr_period': (10, 16),          # ATR周期
+    'rsi_threshold': (25, 45),       # RSI阈值：oversold=threshold（提高，更易触发）
 
     # 策略A参数（核心）
-    'stop_loss_atr_mult_a': (1.0, 1.5),
-    'max_hold_bars_a': (4, 8),
+    'stop_loss_atr_mult_a': (1.0, 1.8),
+    'max_hold_bars_a': (5, 10),      # 延长持仓时间
 
     # 策略B参数（核心）
-    'ema_ratio': (0.3, 0.6),         # ema_fast = ema_slow * ema_ratio
-    'ema_slow': (40, 65),            # 慢速EMA
-    'stop_loss_atr_mult_b': (1.5, 2.5),
-    'trailing_stop_atr_mult': (3.0, 5.0),
+    'ema_ratio': (0.35, 0.55),       # ema_fast = ema_slow * ema_ratio
+    'ema_slow': (35, 55),            # 慢速EMA（缩短，更敏感）
+    'stop_loss_atr_mult_b': (1.8, 3.0),
+    'trailing_stop_atr_mult': (3.5, 5.5),
 }
 
 
@@ -233,23 +234,25 @@ def calculate_calmar_ratio(
         bars_per_day_est = bars_per_day.get(timeframe, 96)  # 默认 15m
         n_days = max(1, bars_count / bars_per_day_est)
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【修复2】年化计算使用自然日历天数
+    #
+    # 原因：n_days 是基于 time_span.days（自然日历天数）计算的
+    # 因此 annual_factor 必须使用 365.0 / n_days
+    #
+    # 移除混合使用 FOREX_TRADING_DAYS_PER_YEAR = 260 的逻辑
+    # 这会导致年化收益被严重低估（260/365 ≈ 0.71 倍）
+    # ═══════════════════════════════════════════════════════════════════════
+
     if n_days <= 0:
         return 0.0
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # 【Critical Fix 9】黄金/外汇市场年度交易日 = 260 天
-    # 股票市场有周末和节假日休市，约 252 交易日
-    # 黄金/外汇市场周末休市但节假日较少，约 260 交易日
-    # ═══════════════════════════════════════════════════════════════════════
-    FOREX_TRADING_DAYS_PER_YEAR = 260
-
-    # 年化因子 - 使用实际天数计算
-    # annual_factor = 交易日数/年 / 实际交易天数
-    # 防止极端值：限制年化因子范围
-    annual_factor = FOREX_TRADING_DAYS_PER_YEAR / max(n_days, 1)
+    # 【修复2】年化因子 - 使用自然日历天数 365
+    # 公式：如果 90 天获得 10% 收益，年化收益 = (1.1)^(365/90) - 1
+    annual_factor = 365.0 / max(n_days, 1)
 
     # 【Critical Fix 9】限制年化因子范围，防止指数爆炸
-    # 如果回测期间过短（如少于 26 天），年化因子会非常大
+    # 如果回测期间过短（如少于 36.5 天），年化因子会非常大
     # 这会导致 (1 + r)^factor 的值极度敏感，Optuna 无法收敛
     annual_factor = min(annual_factor, 10.0)  # 上限 10 年
     annual_factor = max(annual_factor, 0.1)   # 下限 0.1 年
@@ -528,21 +531,24 @@ def calculate_custom_fitness(
         fitness += (profit_factor - 1.5) * 10
 
     # 极端情况处理
-    # 【优化】加强对低交易次数的惩罚
-    # 原逻辑：<5笔才惩罚，改为：低于min_trades/4就开始惩罚
-    min_trade_threshold = min_trades // 4  # 例如 min_trades=100，则阈值为25
-    if total_trades < min_trade_threshold:
-        # 交易次数过少，给予重惩罚
-        # 惩罚强度与距离阈值的差距成正比
-        trade_deficit_ratio = 1 - (total_trades / min_trade_threshold)
-        fitness = -200 * trade_deficit_ratio  # 更强的惩罚
+    # 【2026-03-22 优化】渐进式交易次数惩罚
+    # 12个月数据应该产生至少50笔交易才具备统计意义
+    expected_trades = min_trades // 2  # 期望交易次数（如min_trades=100，则期望50笔）
+
+    if total_trades < expected_trades:
+        # 交易次数不足，给予惩罚
+        trade_ratio = total_trades / expected_trades
+        # 渐进惩罚：50笔时无惩罚，25笔时惩罚50%，10笔时惩罚90%
+        penalty = 1 - trade_ratio
+        fitness *= trade_ratio  # 按比例缩放适应度
         if verbose:
-            print(f"  [交易次数惩罚] 仅{total_trades}笔交易（阈值{min_trade_threshold}），惩罚: {fitness:.2f}")
-    elif total_trades < min_trades // 2:
-        # 交易次数仍然偏少，给予中等惩罚
-        fitness *= 0.5  # 适应度减半
+            print(f"  [交易次数警告] {total_trades}笔交易（期望>{expected_trades}），适应度缩放: {trade_ratio:.2f}x")
+    elif total_trades < min_trades:
+        # 交易次数尚可但不足理想值，轻微惩罚
+        trade_ratio = total_trades / min_trades
+        fitness *= (0.8 + 0.2 * trade_ratio)  # 80%-100%
         if verbose:
-            print(f"  [交易次数警告] {total_trades}笔交易（建议>{min_trades//2}），适应度减半")
+            print(f"  [交易次数提示] {total_trades}笔交易（建议>{min_trades}）")
 
     if verbose:
         print(f"  Return: {total_return:.2f}%, DD: {max_drawdown:.1f}%, "
