@@ -57,22 +57,23 @@ OPTIMIZATION_BOUNDS_FULL = {
 
 # 简化版参数边界（推荐使用）
 # 关键优化参数：10个，n_trials建议 >= 300
-# 【2026-03-22 优化】放宽参数空间，提高交易频率
+# 【深度重构】收窄布林带搜索空间，强制在合理范围内
 OPTIMIZATION_BOUNDS = {
     # 基础指标参数（合并bb和kc周期）
-    'channel_period': (10, 20),      # bb_period = kc_period = channel_period（缩短周期）
-    'bb_std': (1.5, 2.5),            # 布林带标准差（降低，更易触发）
-    'kc_atr_mult': (1.2, 2.0),       # 肯特纳通道ATR倍数（降低，更易触发）
+    'channel_period': (10, 20),      # bb_period = kc_period = channel_period
+    'bb_std': (1.5, 2.2),            # 【深度重构】收窄：拒绝极端参数 2.5
+    'kc_atr_mult': (1.2, 2.0),       # 肯特纳通道ATR倍数
     'atr_period': (10, 16),          # ATR周期
-    'rsi_threshold': (25, 45),       # RSI阈值：oversold=threshold（提高，更易触发）
+    'rsi_threshold': (25, 40),       # RSI阈值
 
     # 策略A参数（核心）
-    'stop_loss_atr_mult_a': (1.0, 1.8),
-    'max_hold_bars_a': (5, 10),      # 延长持仓时间
+    # 【深度重构】放宽止损：从 1.0-1.5 提高到 1.5-2.5
+    'stop_loss_atr_mult_a': (1.5, 2.5),
+    'max_hold_bars_a': (5, 12),      # 延长持仓时间
 
     # 策略B参数（核心）
     'ema_ratio': (0.35, 0.55),       # ema_fast = ema_slow * ema_ratio
-    'ema_slow': (35, 55),            # 慢速EMA（缩短，更敏感）
+    'ema_slow': (35, 55),            # 慢速EMA
     'stop_loss_atr_mult_b': (1.8, 3.0),
     'trailing_stop_atr_mult': (3.5, 5.5),
 }
@@ -367,27 +368,20 @@ def calculate_custom_fitness(
     avg_spread_cost = spread_per_ounce * 100  # $0.2 * 100盎司 = $20/手
 
     # ═══════════════════════════════════════════════════════════════════════
-    # 【修复3.4】软化"微利策略过滤" - 平滑惩罚因子
-    # 原逻辑: 直接返回负值，导致优化器崩溃
-    # 新逻辑: 平滑降低该维度的权重，允许高胜率小利策略存活
+    # 【深度重构】暂时关闭微利惩罚
+    # 目的：在初期只要胜率>50% 就能获得正反馈
     # ═══════════════════════════════════════════════════════════════════════
 
     min_profitable_win = avg_spread_cost * 2  # $40/手 (spread=0.2)
-    micro_profit_penalty = 0.0
+    micro_profit_penalty = 0.0  # 【深度重构】关闭微利惩罚
 
-    if avg_win > 0 and avg_win < min_profitable_win:
-        # 平滑惩罚因子: 盈利越小，惩罚越大
-        # 公式: penalty = 1 - (avg_win / min_profitable_win)
-        # 例如: avg_win = $20, min = $40 → penalty = 0.5 (50%惩罚)
-        profit_ratio = avg_win / min_profitable_win
-        micro_profit_penalty = (1.0 - profit_ratio) * 0.5  # 最高 50% 惩罚
-
-        if verbose:
-            print(f"  [微利策略惩罚] 平均盈利 ${avg_win:.2f} < 2倍点差成本 ${min_profitable_win:.2f}")
-            print(f"  [惩罚因子] {micro_profit_penalty*100:.1f}% 权重降低")
-
-        # 不再直接返回负值，而是在后续计算中应用惩罚
-        # 这样高胜率小利策略仍有机会被保留
+    # 注释掉原有的微利惩罚逻辑
+    # if avg_win > 0 and avg_win < min_profitable_win:
+    #     profit_ratio = avg_win / min_profitable_win
+    #     micro_profit_penalty = (1.0 - profit_ratio) * 0.5
+    #     if verbose:
+    #         print(f"  [微利策略惩罚] 平均盈利 ${avg_win:.2f} < 2倍点差成本 ${min_profitable_win:.2f}")
+    #         print(f"  [惩罚因子] {micro_profit_penalty*100:.1f}% 权重降低")
 
     # ═══════════════════════════════════════════════════════════════════════
     # 【Critical Fix 8】平滑指数级惩罚函数

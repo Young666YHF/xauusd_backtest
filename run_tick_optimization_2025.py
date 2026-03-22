@@ -44,7 +44,7 @@ from config import SPREAD_PER_OUNCE
 # =============================================================================
 DATA_DIR = '/home/ctyun/xauusd_data'
 INTERVAL = '15min'
-N_TRIALS = 100  # Optuna 优化次数（先测试 100 次）
+N_TRIALS = 200  # Optuna 优化次数（增加到200次以更好探索参数空间）
 MIN_TRADES = 100  # 最小交易次数阈值
 
 # 数据范围
@@ -188,6 +188,7 @@ def create_tick_optuna_objective(
 
         from tick_engine import enhanced_tick_matcher, COMMISSION_PER_LOT, DEFAULT_LEVERAGE, MARGIN_CALL_RATIO
 
+        # 【零摩擦基准测试】使用零佣金
         trades_record, equity_curve, total_trades, winning_trades, total_ticks, margin_calls = enhanced_tick_matcher(
             ticks_array,
             signals_array,
@@ -197,7 +198,7 @@ def create_tick_optuna_objective(
             max_hold_bars_a,
             trailing_mult_b,
             1.0,       # position_size
-            3.5,       # commission_per_lot
+            0.0,       # 【零摩擦】commission_per_lot: 3.5 -> 0
             DEFAULT_LEVERAGE,
             MARGIN_CALL_RATIO
         )
@@ -397,7 +398,7 @@ def run_backtest(best_params: dict):
         max_hold_bars_a,
         trailing_mult_b,
         1.0,
-        3.5,
+        0.0,       # 【零摩擦】commission_per_lot: 3.5 -> 0
         DEFAULT_LEVERAGE,
         MARGIN_CALL_RATIO
     )

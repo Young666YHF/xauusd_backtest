@@ -125,27 +125,27 @@ MAX_CONCURRENT_POSITIONS = 2  # 策略 A 和策略 B 各一个
 # ============================================================================
 # 【Critical Fix 1】非对称滑点模型参数
 # ============================================================================
-# 基础滑点参数
-BASE_SLIPPAGE = 0.15
-ATR_SLIPPAGE_RATIO = 0.03
+# 【零摩擦基准测试】暂时设为极小值，寻找纯逻辑 Alpha
+BASE_SLIPPAGE = 0.0    # 基础滑点: 0.15 -> 0 (零摩擦)
+ATR_SLIPPAGE_RATIO = 0.0  # ATR滑点比例: 0.03 -> 0
 
 # 止损滑点（流动性匮乏场景）
-STOP_LOSS_SLIPPAGE_MULT = 2.0      # 止损滑点加倍（惩罚）
-STOP_LOSS_ATR_RATIO = 0.08         # 止损使用更大的 ATR 比例
+STOP_LOSS_SLIPPAGE_MULT = 0.0      # 止损滑点加倍: 2.0 -> 0 (零摩擦)
+STOP_LOSS_ATR_RATIO = 0.0          # 止损使用更大的 ATR 比例: 0.08 -> 0
 
 # 止盈滑点（限价单属性）
 TAKE_PROFIT_SLIPPAGE_MULT = 0.0    # 止盈滑点为 0（限价单成交）
-TAKE_PROFIT_POSITIVE_SLIP_CHANCE = 0.3  # 正滑点概率 30%
-TAKE_PROFIT_POSITIVE_SLIP_MAX = 0.1     # 最大正滑点 $0.1
+TAKE_PROFIT_POSITIVE_SLIP_CHANCE = 0.0  # 正滑点概率: 0.3 -> 0
+TAKE_PROFIT_POSITIVE_SLIP_MAX = 0.0     # 最大正滑点: $0.1 -> 0
 
 # 策略差异
-SLIPPAGE_MULT_A = 0.5
-SLIPPAGE_MULT_B = 3.0
-ATR_SLIP_RATIO_A = 0.03
-ATR_SLIP_RATIO_B = 0.10
+SLIPPAGE_MULT_A = 0.0   # 0.5 -> 0
+SLIPPAGE_MULT_B = 0.0   # 3.0 -> 0
+ATR_SLIP_RATIO_A = 0.0  # 0.03 -> 0
+ATR_SLIP_RATIO_B = 0.0  # 0.10 -> 0
 
 # 跳空惩罚
-GAP_SLIPPAGE_MULTIPLIER = 2.0
+GAP_SLIPPAGE_MULTIPLIER = 0.0  # 2.0 -> 0
 
 # ============================================================================
 # 【Critical Fix 2】保证金参数
@@ -154,9 +154,9 @@ DEFAULT_LEVERAGE = 100             # 默认杠杆 1:100
 MARGIN_CALL_RATIO = 0.5           # 保证金比例低于 50% 触发爆仓
 MIN_MARGIN_RATIO = 0.2            # 最低保证金比例
 
-# 佣金参数
-COMMISSION_PER_LOT = 3.5
-COMMISSION_ROUND_TRIP = 7.0
+# 【零摩擦基准测试】佣金设为 0
+COMMISSION_PER_LOT = 0.0   # 3.5 -> 0
+COMMISSION_ROUND_TRIP = 0.0  # 7.0 -> 0
 
 # ============================================================================
 # 【Critical Fix 4】新闻事件过滤参数

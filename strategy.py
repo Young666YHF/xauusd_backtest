@@ -52,7 +52,7 @@ class TradeSignal:
 
 @dataclass
 class PendingSignal:
-    """待确认信号数据结构（价格行为确认版本）"""
+    """待确认信号数据结构（突破回踩版本）"""
     breakout_bar_index: int           # 突破发生的K线索引
     direction: int                    # 1=做多, -1=做空
     breakout_price: float             # 突破价格
@@ -62,11 +62,13 @@ class PendingSignal:
     ema_diff: float                   # 突破时的EMA差值
     prev_low: float                   # 前一根K线低点
     prev_high: float                  # 前一根K线高点
-    breakout_high: float              # 突破K线的最高价（用于价格行为确认）
-    breakout_low: float               # 突破K线的最低价（用于价格行为确认）
+    breakout_high: float              # 突破K线的最高价（Resistance）
+    breakout_low: float               # 突破K线的最低价（Support）
+    ema_fast: float                   # 突破时的EMA快线（回踩目标）
+    ema_slow: float                   # 突破时的EMA慢线
     max_confirmation_bars: int        # 最大确认K线数（超时失败）
     bars_passed: int = 0              # 已经过的K线数
-    triggered: bool = False           # 是否已触发（价格行为确认成功）
+    triggered: bool = False           # 是否已触发（回踩确认成功）
     failed: bool = False              # 是否已失败
 
 
@@ -254,7 +256,14 @@ class TradingStrategy:
         idx: int
     ) -> Optional[TradeSignal]:
         """
-        策略A: 亚盘均值回归策略（重构版）
+        策略A: 亚盘均值回归策略（深度重构版 - Pinbar 过滤）
+
+        【深度重构】从"接飞刀"到"见底确认"
+        黄金插针极多，不能一碰布林带就进场。
+
+        新增入场条件：
+        1. Pinbar/长下影线确认：当做多时，下影线 > 实体的 1.5 倍
+        2. 放宽止损：从 1.0-1.5 ATR 提高到 1.5-2.5 ATR
 
         核心修复:
         1. 止损锚定信号生成时的技术位，不锚定未知的开盘价
@@ -266,6 +275,7 @@ class TradingStrategy:
         - 价格触及布林带下轨
         - RSI < 超卖阈值
         - 无异常波动
+        - 【新增】Pinbar 确认：下影线 > 实体 * 1.5
 
         止损逻辑（关键修复）:
         - 止损锚定信号K线的Close或布林带下轨
@@ -280,33 +290,50 @@ class TradingStrategy:
         # 获取参数
         rsi_oversold = self.params.get('rsi_oversold', 21)
         rsi_overbought = self.params.get('rsi_overbought', 75)
-        stop_loss_mult = self.params.get('stop_loss_atr_mult_a', 1.2)
+        stop_loss_mult = self.params.get('stop_loss_atr_mult_a', 1.8)  # 放宽止损
 
         close = row['Close']
         bb_lower = row['BB_Lower']
         bb_upper = row['BB_Upper']
         rsi = row['RSI']
         atr = row['ATR']
+        high = row['High']
+        low = row['Low']
+        open_price = row['Open']
 
         direction = 0
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 【修复3.3】放宽布林带条件 - 使用"接近"而非"触及"
-        # 原条件: close <= bb_lower (太严格，bb_std=2.9 时几乎不会触及)
-        # 新条件: close <= bb_lower + atr * 0.5 (允许更大容差，提高交易频率)
+        # 【深度重构】布林带条件 + Pinbar 确认
         # ═══════════════════════════════════════════════════════════════════════
 
-        # 布林带容差（允许在布林带外侧一小段距离入场）
-        # 【优化】从0.3*ATR提高到0.5*ATR，增加入场机会
+        # 布林带容差
         bb_tolerance = atr * 0.5
 
-        # 做多信号检测：价格接近或触及下轨
-        if close <= bb_lower + bb_tolerance and rsi < rsi_oversold:
-            direction = 1
+        # 计算 K 线实体和影线
+        body = abs(close - open_price)
+        lower_shadow = min(close, open_price) - low   # 下影线
+        upper_shadow = high - max(close, open_price)  # 上影线
 
-        # 做空信号检测：价格接近或触及上轨
+        # Pinbar 确认阈值：影线必须大于实体的 1.5 倍
+        PINBAR_RATIO = 1.5
+
+        # 做多信号检测：价格接近下轨 + RSI 超卖 + Pinbar 确认
+        if close <= bb_lower + bb_tolerance and rsi < rsi_oversold:
+            # 【新增】Pinbar 确认：下影线必须足够长（拒绝下跌的针）
+            # 条件：下影线 > 实体 * 1.5，说明多头在此位置有抵抗
+            pinbar_confirmed = lower_shadow > body * PINBAR_RATIO
+
+            if pinbar_confirmed:
+                direction = 1
+
+        # 做空信号检测：价格接近上轨 + RSI 超买 + Pinbar 确认
         elif close >= bb_upper - bb_tolerance and rsi > rsi_overbought:
-            direction = -1
+            # 【新增】Pinbar 确认：上影线必须足够长（拒绝上涨的针）
+            pinbar_confirmed = upper_shadow > body * PINBAR_RATIO
+
+            if pinbar_confirmed:
+                direction = -1
 
         if direction == 0:
             return None
@@ -316,22 +343,17 @@ class TradingStrategy:
             return None  # 异常波动，放弃信号
 
         # ========== 关键修复：止损锚定信号生成时的技术位 ==========
-        # 止损不再锚定未知的开盘价，而是锚定当前已知的技术位
-        # 这样即使开盘价跳空，止损线也不会"滑坡"
+        # 【深度重构】放宽止损：给黄金波动留出喘息空间
         if direction == 1:
             # 多头：止损锚定布林带下轨或收盘价较低者
-            # 这是最坏情况下的技术支撑位
             stop_loss = min(close, bb_lower) - stop_loss_mult * atr
-            reason = f"均值回归做多: 价格{close:.2f}触及下轨, RSI={rsi:.1f}"
+            reason = f"均值回归做多: 价格{close:.2f}触及下轨, RSI={rsi:.1f}, Pinbar确认"
         else:
             # 空头：止损锚定布林带上轨或收盘价较高者
             stop_loss = max(close, bb_upper) + stop_loss_mult * atr
-            reason = f"均值回归做空: 价格{close:.2f}触及上轨, RSI={rsi:.1f}"
+            reason = f"均值回归做空: 价格{close:.2f}触及上轨, RSI={rsi:.1f}, Pinbar确认"
 
         # ========== 策略解耦：只输出订单意图 ==========
-        # 不再访问 next_bar['Open']
-        # entry_price 设为 None，由回测引擎填充实际开盘价
-        # signal_bar_index 和 execution_bar_index 告诉引擎何时执行
         signal = TradeSignal(
             timestamp=df.index[idx],
             signal_type=SignalType.LONG if direction == 1 else SignalType.SHORT,
@@ -357,50 +379,84 @@ class TradingStrategy:
         pending: PendingSignal
     ) -> Tuple[bool, bool, str]:
         """
-        检查当前K线是否满足价格行为确认条件
+        【深度重构】检查突破回踩确认条件
 
-        【修复3.5】进一步放宽确认条件
-        - 不再要求突破新高/低
-        - 只要价格仍在趋势方向上，且没有跌破关键支撑，立即入场
-        - 目标：减少等待时间，增加交易频率
+        从"追高买顶"改为"突破回踩":
+        - XAUUSD 突破 2.0 Std 布林带后，80% 会发生回撤
+        - 不在突破时立即入场，而是等待回踩 EMA 快线后再入场
+
+        确认条件（做多）:
+        1. 价格回踩 EMA 快线：low <= ema_fast
+        2. 出现反弹收阳线：close > open
+        3. 未跌破 EMA 慢线（趋势生存线）
+
+        确认条件（做空）:
+        1. 价格回踩 EMA 快线：high >= ema_fast
+        2. 出现反弹收阴线：close < open
+        3. 未突破 EMA 慢线（趋势生存线）
         """
         current_bar = df.iloc[current_idx]
         high = current_bar['High']
         low = current_bar['Low']
         close = current_bar['Close']
+        open_price = current_bar['Open']
 
-        # 获取布林带中轨（趋势生存线）
-        bb_middle = current_bar['BB_Middle']
+        # 获取当前的 EMA 值（使用突破时记录的值作为参考）
+        ema_fast = pending.ema_fast
+        ema_slow = pending.ema_slow
 
         # 更新已过K线数
         pending.bars_passed += 1
 
         # 检查是否超时
         if pending.bars_passed > pending.max_confirmation_bars:
-            return False, True, f"确认超时: {pending.bars_passed}根K线未触发确认"
+            return False, True, f"确认超时: {pending.bars_passed}根K线未触发回踩确认"
 
         # ═══════════════════════════════════════════════════════════════════════
-        # 【修复3.5】简化确认逻辑 - 快速入场
+        # 【深度重构】突破回踩确认逻辑
         # ═══════════════════════════════════════════════════════════════════════
 
-        if pending.direction == 1:  # 向上突破
-            # 条件1: 立即入场（不再等待突破新高）
-            # 只要没有跌破中轨就入场
-            if close >= bb_middle:
+        if pending.direction == 1:  # 向上突破后等待回踩
+            # 条件1: 价格回踩到 EMA 快线附近
+            pullback_to_ema = low <= ema_fast
+
+            # 条件2: 出现反弹收阳线（拒绝进一步下跌）
+            bullish_candle = close > open_price
+
+            # 条件3: 未跌破 EMA 慢线（趋势仍在）
+            trend_alive = close >= ema_slow
+
+            if pullback_to_ema and bullish_candle and trend_alive:
                 pending.triggered = True
-                return True, False, f"快速确认: 收盘价{close:.2f}在中轨{bb_middle:.2f}之上"
+                return True, False, f"回踩确认成功: 低点{low:.2f}回踩EMA快线{ema_fast:.2f}, 收阳线反弹"
 
-            # 条件2: 跌破中轨 → 失败
-            return False, True, f"确认失败: 收盘价{close:.2f}跌破中轨{bb_middle:.2f}"
+            # 失败条件: 跌破 EMA 慢线
+            if close < ema_slow:
+                return False, True, f"确认失败: 收盘价{close:.2f}跌破EMA慢线{ema_slow:.2f}, 趋势失效"
 
-        else:  # 向下突破
-            # 条件1: 立即入场（不再等待突破新低）
-            if close <= bb_middle:
+            # 继续等待
+            return False, False, f"等待回踩: 当前低点{low:.2f}, EMA快线{ema_fast:.2f}"
+
+        else:  # 向下突破后等待回踩
+            # 条件1: 价格回踩到 EMA 快线附近
+            pullback_to_ema = high >= ema_fast
+
+            # 条件2: 出现反弹收阴线（拒绝进一步上涨）
+            bearish_candle = close < open_price
+
+            # 条件3: 未突破 EMA 慢线（趋势仍在）
+            trend_alive = close <= ema_slow
+
+            if pullback_to_ema and bearish_candle and trend_alive:
                 pending.triggered = True
-                return True, False, f"快速确认: 收盘价{close:.2f}在中轨{bb_middle:.2f}之下"
+                return True, False, f"回踩确认成功: 高点{high:.2f}回踩EMA快线{ema_fast:.2f}, 收阴线回落"
 
-            # 条件2: 突破中轨 → 失败
-            return False, True, f"确认失败: 收盘价{close:.2f}突破中轨{bb_middle:.2f}"
+            # 失败条件: 突破 EMA 慢线
+            if close > ema_slow:
+                return False, True, f"确认失败: 收盘价{close:.2f}突破EMA慢线{ema_slow:.2f}, 趋势失效"
+
+            # 继续等待
+            return False, False, f"等待回踩: 当前高点{high:.2f}, EMA快线{ema_fast:.2f}"
 
     def generate_strategy_b_signal(
         self,
@@ -538,8 +594,10 @@ class TradingStrategy:
             ema_diff=ema_fast - ema_slow if direction == 1 else ema_slow - ema_fast,
             prev_low=prev_low,
             prev_high=prev_high,
-            breakout_high=row['High'],  # 突破K线最高价（用于价格行为确认）
-            breakout_low=row['Low'],    # 突破K线最低价（用于价格行为确认）
+            breakout_high=row['High'],  # 突破K线最高价（Resistance）
+            breakout_low=row['Low'],    # 突破K线最低价（Support）
+            ema_fast=ema_fast,          # 【新增】EMA快线（回踩目标）
+            ema_slow=ema_slow,          # 【新增】EMA慢线（趋势生存线）
             max_confirmation_bars=self.pullback_confirmation_bars,  # 最大确认K线数
             bars_passed=0,
             triggered=False,
