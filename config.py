@@ -6,8 +6,8 @@ XAUUSD 量化交易回测系统 - 配置文件
 SYMBOL = "GC=F"  # yfinance黄金期货代码
 TIMEFRAME = "15m"  # 15分钟周期（用户要求）
 CONTRACT_SIZE = 100  # 每手100盎司
-SPREAD_PER_LOT = 60  # 每手点差60美元
-SPREAD_PER_OUNCE = 0.6  # 每盎司点差0.6美元
+SPREAD_PER_LOT = 20  # 每手点差20美元 (ECN实际)
+SPREAD_PER_OUNCE = 0.2  # 每盎司点差0.2美元 (ECN实际: 0.15-0.25)
 
 # 交易时段（北京时间 UTC+8）
 ASIAN_SESSION_START = 6   # 亚盘开始

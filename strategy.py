@@ -349,11 +349,17 @@ class TradingStrategy:
         """
         检查当前K线是否满足价格行为确认条件（修复"接盘"问题）
 
-        核心改进: 不再死等N根K线，而是使用价格行为确认：
-        - 多头: 当价格突破突破K线的最高价时，立即触发Buy Stop入场
-        - 空头: 当价格跌破突破K线的最低价时，立即触发Sell Stop入场
+        【修复3.1】放宽价格行为确认条件
+        - 多头: 只要不跌破布林带中轨，且价格突破 breakout_high 即可入场
+        - 空头: 只要不突破布林带中轨，且价格跌破 breakout_low 即可入场
 
-        这样可以确保在趋势延续时入场，而不是在趋势末期接盘。
+        原逻辑过于严苛：
+        - 要求收盘价始终在布林带外（导致大量有效突破被过滤）
+        - 只在创新高/低时触发（错过了很多趋势初期机会）
+
+        新逻辑：
+        - 使用布林带中轨作为"趋势生存线"
+        - 价格行为确认改为"突破触发"而非"等待回调"
 
         Args:
             df: 完整DataFrame
@@ -366,6 +372,10 @@ class TradingStrategy:
         current_bar = df.iloc[current_idx]
         high = current_bar['High']
         low = current_bar['Low']
+        close = current_bar['Close']
+
+        # 获取布林带中轨（趋势生存线）
+        bb_middle = current_bar['BB_Middle']
 
         # 更新已过K线数
         pending.bars_passed += 1
@@ -374,26 +384,31 @@ class TradingStrategy:
         if pending.bars_passed > pending.max_confirmation_bars:
             return False, True, f"确认超时: {pending.bars_passed}根K线未触发价格行为确认"
 
-        # 价格行为确认逻辑
-        if pending.direction == 1:  # 向上突破，等待价格创新高
-            # 条件1: 价格突破突破K线的最高价 → 立即入场
+        # ═══════════════════════════════════════════════════════════════════════
+        # 【修复3.1】放宽的价格行为确认逻辑
+        # ═══════════════════════════════════════════════════════════════════════
+
+        if pending.direction == 1:  # 向上突破
+            # 【放宽】条件1: 价格突破突破K线最高价 → 触发入场
             if high > pending.breakout_high:
                 pending.triggered = True
                 return True, False, f"价格行为确认成功: 最高价{high:.2f}突破{pending.breakout_high:.2f}"
 
-            # 条件2: 价格回落到布林带以下 → 确认失败
-            if current_bar['Close'] < pending.bb_upper:
-                return False, True, f"确认失败: 收盘价{current_bar['Close']:.2f}跌破上轨{pending.bb_upper:.2f}"
+            # 【放宽】条件2: 收盘价跌破布林带中轨 → 趋势失败
+            # 原逻辑: 收盘价 < bb_upper 就失败（太严苛）
+            # 新逻辑: 收盘价 < bb_middle 才失败（允许回调）
+            if close < bb_middle:
+                return False, True, f"确认失败: 收盘价{close:.2f}跌破中轨{bb_middle:.2f}"
 
-        else:  # 向下突破，等待价格创新低
-            # 条件1: 价格跌破突破K线的最低价 → 立即入场
+        else:  # 向下突破
+            # 【放宽】条件1: 价格跌破突破K线最低价 → 触发入场
             if low < pending.breakout_low:
                 pending.triggered = True
                 return True, False, f"价格行为确认成功: 最低价{low:.2f}跌破{pending.breakout_low:.2f}"
 
-            # 条件2: 价格反弹到布林带以上 → 确认失败
-            if current_bar['Close'] > pending.bb_lower:
-                return False, True, f"确认失败: 收盘价{current_bar['Close']:.2f}突破下轨{pending.bb_lower:.2f}"
+            # 【放宽】条件2: 收盘价突破布林带中轨 → 趋势失败
+            if close > bb_middle:
+                return False, True, f"确认失败: 收盘价{close:.2f}突破中轨{bb_middle:.2f}"
 
         # 继续等待
         return False, False, f"等待价格行为确认: {pending.bars_passed}/{pending.max_confirmation_bars}"
@@ -433,7 +448,7 @@ class TradingStrategy:
             pending = self.state.pending_signal
 
             # 检查当前K线是否是预期的确认K线
-            expected_idx = pending.breakout_bar_index + pending.confirmation_bars_passed + 1
+            expected_idx = pending.breakout_bar_index + pending.bars_passed + 1
 
             if idx == expected_idx:
                 # 执行确认检查
@@ -489,13 +504,33 @@ class TradingStrategy:
 
         direction = 0
 
-        # 向上突破检测
-        if close > bb_upper and bb_upper > kc_upper and ema_fast > ema_slow:
-            direction = 1
+        # ═══════════════════════════════════════════════════════════════════════
+        # 【修复3.2】EMA 动能过滤 - 激活幽灵参数 ema_momentum_threshold
+        # ═══════════════════════════════════════════════════════════════════════
 
-        # 向下突破检测
-        elif close < bb_lower and bb_lower < kc_lower and ema_fast < ema_slow:
-            direction = -1
+        # 计算 EMA 发散动能
+        ema_momentum = abs(ema_fast - ema_slow) / ema_slow
+        ema_momentum_threshold = self.ema_momentum_threshold  # 从 params 获取
+
+        # 向上突破检测 - 增加 EMA 动能过滤
+        if close > bb_upper and bb_upper > kc_upper:
+            # 原条件: 仅 ema_fast > ema_slow
+            # 新条件: ema_fast > ema_slow 且发散动能足够
+            if ema_fast > ema_slow:
+                # 【激活】EMA 动能过滤
+                if ema_momentum > ema_momentum_threshold:
+                    direction = 1
+                # else: EMA 虽然金叉但发散不足，不入场
+
+        # 向下突破检测 - 增加 EMA 动能过滤
+        elif close < bb_lower and bb_lower < kc_lower:
+            # 原条件: 仅 ema_fast < ema_slow
+            # 新条件: ema_fast < ema_slow 且发散动能足够
+            if ema_fast < ema_slow:
+                # 【激活】EMA 动能过滤
+                if ema_momentum > ema_momentum_threshold:
+                    direction = -1
+                # else: EMA 虽然死叉但发散不足，不入场
 
         if direction == 0:
             return None

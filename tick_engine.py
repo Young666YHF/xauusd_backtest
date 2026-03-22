@@ -249,13 +249,18 @@ def get_broker_offset_from_utc(is_dst: bool) -> int:
 
 
 # =============================================================================
-# 【Critical Fix 4】新闻事件过滤器
+# 【Critical Fix 4】新闻事件过滤器 - 策略差异化熔断
 # =============================================================================
 class NewsEventFilter:
     """
-    新闻事件过滤器
+    新闻事件过滤器 - 策略差异化熔断版本
 
-    检测极端市场条件并自动熔断
+    【修复3.3】关键改进:
+    - 策略A (均值回归): 极端波动时熔断，避免被扫损
+    - 策略B (动量突破): 极端波动视为确认信号，不熔断
+
+    原问题: 波动率飙升时全面熔断，直接杀死了策略B的动量突破机会
+    新逻辑: 根据策略特性差异化处理，让策略B在波动爆发时入场
     """
 
     def __init__(self, volume_spike_mult: float = NEWS_VOLUME_SPIKE_MULT,
@@ -267,31 +272,37 @@ class NewsEventFilter:
 
         # 状态
         self.last_news_time = None
-        self.is_frozen = False
+        self.is_frozen_strategy_a = False  # 仅熔断策略A
 
         # 历史数据
         self.recent_volumes = []
         self.recent_atrs = []
 
-    def update(self, tick_volume: float, current_atr: float, timestamp: float) -> bool:
+        # 检测状态
+        self.current_volatility_spike = False
+        self.spike_intensity = 0.0  # 波动率突变强度
+
+    def update(self, tick_volume: float, current_atr: float, timestamp: float,
+               strategy: str = 'A') -> Tuple[bool, bool, float]:
         """
-        更新过滤器状态并检查是否应熔断
+        更新过滤器状态并返回策略特定的交易许可
+
+        【修复3.3】策略差异化返回值
 
         Args:
             tick_volume: 当前 K 线 Tick Volume
             current_atr: 当前 ATR
             timestamp: 当前时间戳
+            strategy: 策略标识 ('A' 或 'B')
 
         Returns:
-            True 表示应继续交易，False 表示应熔断
+            (策略A是否允许交易, 策略B是否允许交易, 波动率突变强度)
         """
         # 检查冷却期
-        if self.is_frozen and self.last_news_time is not None:
+        if self.is_frozen_strategy_a and self.last_news_time is not None:
             elapsed = timestamp - self.last_news_time
-            if elapsed < self.cooldown_minutes * 60:
-                return False  # 仍在冷却期
-            else:
-                self.is_frozen = False
+            if elapsed >= self.cooldown_minutes * 60:
+                self.is_frozen_strategy_a = False
 
         # 更新历史数据
         self.recent_volumes.append(tick_volume)
@@ -305,7 +316,9 @@ class NewsEventFilter:
 
         # 数据不足时不检测
         if len(self.recent_volumes) < 5:
-            return True
+            self.current_volatility_spike = False
+            self.spike_intensity = 0.0
+            return True, True, 0.0
 
         # 计算平均值
         avg_volume = np.mean(self.recent_volumes[:-1])
@@ -318,19 +331,66 @@ class NewsEventFilter:
         volume_spike = avg_volume > 0 and current_vol > avg_volume * self.volume_spike_mult
         atr_spike = avg_atr > 0 and current_at > avg_atr * self.atr_spike_mult
 
-        if volume_spike or atr_spike:
-            self.is_frozen = True
-            self.last_news_time = timestamp
-            return False
+        # 计算波动率突变强度
+        self.spike_intensity = 0.0
+        if avg_atr > 0:
+            self.spike_intensity = max(
+                (current_vol / avg_volume - 1) if avg_volume > 0 else 0,
+                (current_at / avg_atr - 1)
+            )
 
-        return True
+        # ═══════════════════════════════════════════════════════════════════════
+        # 【修复3.3】策略差异化处理
+        # ═══════════════════════════════════════════════════════════════════════
+
+        if volume_spike or atr_spike:
+            self.current_volatility_spike = True
+            self.last_news_time = timestamp
+
+            # 策略A: 均值回归策略在极端波动时熔断
+            # 原因: 震荡策略依赖均值回归，极端波动会破坏均值关系
+            self.is_frozen_strategy_a = True
+
+            # 策略B: 动量突破策略不熔断，甚至可以视为确认信号
+            # 原因: 趋势策略需要波动率爆发来确认趋势
+            return False, True, self.spike_intensity
+        else:
+            self.current_volatility_spike = False
+            # 正常市场：两个策略都可以交易
+            return not self.is_frozen_strategy_a, True, 0.0
+
+    def should_allow_trade(self, strategy: str) -> bool:
+        """
+        检查特定策略是否应该允许交易
+
+        Args:
+            strategy: 'A' 或 'B'
+
+        Returns:
+            True 表示允许交易
+        """
+        if strategy == 'A':
+            return not self.is_frozen_strategy_a
+        else:  # strategy == 'B'
+            return True  # 策略B永不熔断
+
+    def is_momentum_confirmation(self) -> bool:
+        """
+        检查当前是否处于动量确认状态（供策略B使用）
+
+        Returns:
+            True 表示波动率爆发，适合动量突破
+        """
+        return self.current_volatility_spike and self.spike_intensity > 0.5
 
     def reset(self):
         """重置过滤器状态"""
         self.last_news_time = None
-        self.is_frozen = False
+        self.is_frozen_strategy_a = False
         self.recent_volumes = []
         self.recent_atrs = []
+        self.current_volatility_spike = False
+        self.spike_intensity = 0.0
 
 
 # =============================================================================
@@ -338,7 +398,7 @@ class NewsEventFilter:
 # =============================================================================
 def prepare_tick_data(tick_df: pd.DataFrame, ohlcv_df: pd.DataFrame,
                       interval: str = '15min',
-                      spread_per_ounce: float = 0.6) -> np.ndarray:
+                      spread_per_ounce: float = 0.2) -> np.ndarray:
     """
     将 Tick DataFrame 转换为纯 Numpy 数组
 
@@ -346,6 +406,10 @@ def prepare_tick_data(tick_df: pd.DataFrame, ohlcv_df: pd.DataFrame,
     - 优先判断真实 Bid/Ask 字段是否存在
     - 仅在极端缺乏 Bid/Ask 数据时，使用参数传入的 spread_per_ounce 动态生成
     - 移除硬编码的 0.3 点差逻辑
+
+    【修复3.5】更新默认点差
+    - XAUUSD 在主流 ECN 平台的实际点差通常在 0.15 - 0.25
+    - 默认值改为 0.2（更接近实际）
 
     Args:
         tick_df: Tick 数据 DataFrame

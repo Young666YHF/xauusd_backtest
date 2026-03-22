@@ -305,7 +305,7 @@ def calculate_custom_fitness(
     verbose: bool = False,
     equity_curve: pd.DataFrame = None,
     timeframe: str = '15m',
-    spread_per_ounce: float = 0.6
+    spread_per_ounce: float = 0.2
 ) -> float:
     """
     计算自定义适应度函数（加固版）
@@ -322,9 +322,9 @@ def calculate_custom_fitness(
     - 增加对"单次最大回撤持续时间"的惩罚
     - 回撤超过15天给予0.5权重惩罚
 
-    【加固3.3】微利策略过滤（严格执行）
-    - 平均每笔盈利 < 2 * 平均点差成本，Fitness直接设为负值
-    - 不需要看起来胜率高的剥头皮策略
+    【修复3.4】软化微利策略过滤
+    - 不再直接返回负值导致优化器崩溃
+    - 改为平滑惩罚因子，允许高胜率小利策略存活
 
     设计理念:
     1. Calmar比率作为核心指标（收益/风险）
@@ -339,7 +339,7 @@ def calculate_custom_fitness(
         verbose: 是否打印调试信息
         equity_curve: 权益曲线DataFrame（可选，用于精确计算）
         timeframe: K线周期
-        spread_per_ounce: 每盎司点差（XAUUSD 典型值为 $0.6）
+        spread_per_ounce: 每盎司点差（XAUUSD ECN 实际值 $0.15-$0.25，默认 $0.2）
 
     Returns:
         适应度值（越高越好）
@@ -361,17 +361,30 @@ def calculate_custom_fitness(
     net_profit_after_commission = total_pnl - (total_trades * commission_per_lot / 2)
 
     # 平均点差成本（每笔交易）
-    avg_spread_cost = spread_per_ounce * 100  # $0.6 * 100盎司 = $60/手
+    avg_spread_cost = spread_per_ounce * 100  # $0.2 * 100盎司 = $20/手
 
-    # ========== 【加固3.3】微利策略过滤（严格执行）==========
-    # 如果平均每笔盈利 < 2 * 平均点差成本，该 Trial 的 Fitness 直接设为负值
-    min_profitable_win = avg_spread_cost * 2  # $120/手
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【修复3.4】软化"微利策略过滤" - 平滑惩罚因子
+    # 原逻辑: 直接返回负值，导致优化器崩溃
+    # 新逻辑: 平滑降低该维度的权重，允许高胜率小利策略存活
+    # ═══════════════════════════════════════════════════════════════════════
+
+    min_profitable_win = avg_spread_cost * 2  # $40/手 (spread=0.2)
+    micro_profit_penalty = 0.0
 
     if avg_win > 0 and avg_win < min_profitable_win:
+        # 平滑惩罚因子: 盈利越小，惩罚越大
+        # 公式: penalty = 1 - (avg_win / min_profitable_win)
+        # 例如: avg_win = $20, min = $40 → penalty = 0.5 (50%惩罚)
+        profit_ratio = avg_win / min_profitable_win
+        micro_profit_penalty = (1.0 - profit_ratio) * 0.5  # 最高 50% 惩罚
+
         if verbose:
-            print(f"  [微利策略拒绝] 平均盈利 ${avg_win:.2f} < 2倍点差成本 ${min_profitable_win:.2f}")
-        # 直接返回负值，拒绝该参数组合
-        return -1000.0 - (min_profitable_win - avg_win)
+            print(f"  [微利策略惩罚] 平均盈利 ${avg_win:.2f} < 2倍点差成本 ${min_profitable_win:.2f}")
+            print(f"  [惩罚因子] {micro_profit_penalty*100:.1f}% 权重降低")
+
+        # 不再直接返回负值，而是在后续计算中应用惩罚
+        # 这样高胜率小利策略仍有机会被保留
 
     # ═══════════════════════════════════════════════════════════════════════
     # 【Critical Fix 8】平滑指数级惩罚函数
@@ -432,6 +445,10 @@ def calculate_custom_fitness(
 
     # 综合适应度 = 收益 * 平滑衰减因子 + Calmar奖励
     fitness = base_fitness * trade_factor * dd_factor
+
+    # 【修复3.4】应用微利策略平滑惩罚
+    if micro_profit_penalty > 0:
+        fitness *= (1.0 - micro_profit_penalty)
 
     # Calmar奖励（如果Calmar>0，额外加分）
     if calmar > 0:
@@ -593,7 +610,7 @@ def create_optuna_objective(
         engine = BacktestEngine(
             initial_capital=100000,
             position_size=1.0,
-            spread_per_ounce=0.6
+            spread_per_ounce=0.2
         )
 
         stats = engine.run_backtest(df_ind, strategy, verbose=False)
@@ -622,6 +639,7 @@ def run_walk_forward_optimization(
     n_splits: int = 3,
     n_trials: int = 100,
     min_trades: int = 100,
+    min_is_bars: int = None,
     verbose: bool = True
 ) -> Dict:
     """
@@ -633,11 +651,22 @@ def run_walk_forward_optimization(
     3. 在IS上优化参数，在OOS上验证
     4. 最终选择OOS表现最好的参数
 
+    【修复3.5】WFO 样本最小化
+    - 针对 15 分钟周期数据，WFO 切分后单次 IS 样本可能不足
+    - 新增 min_is_bars 参数：确保每次 IS 至少包含指定数量的 K 线
+    - 采用滚动窗口而非完全不重叠的切分法
+
+    15分钟周期参考:
+    - 1 个月 ≈ 96 根/天 * 22 天 = 2112 根 K 线
+    - 6 个月 ≈ 12672 根 K 线
+    - 建议 min_is_bars >= 6000 (约 3 个月)
+
     Args:
         df: 完整数据
         n_splits: WFO分割数（建议3-5）
         n_trials: 每轮Optuna优化次数
         min_trades: 最小交易次数
+        min_is_bars: IS 样本最小 K 线数（默认 6 个月数据量）
         verbose: 是否打印详细信息
 
     Returns:
@@ -649,7 +678,39 @@ def run_walk_forward_optimization(
         raise ImportError("请先安装optuna: pip install optuna")
 
     n_bars = len(df)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【修复3.5】WFO 样本最小化
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # 15分钟周期：6个月约 12672 根 K 线
+    if min_is_bars is None:
+        # 自动计算：至少 3 个月数据
+        min_is_bars = 96 * 22 * 3  # ≈ 6336 根
+
+    # 计算实际可用的分割数
+    # 确保每个 IS 至少有 min_is_bars 根 K 线
+    max_possible_splits = max(2, n_bars // min_is_bars)
+
+    if n_splits > max_possible_splits:
+        if verbose:
+            print(f"\n⚠️  【WFO 警告】请求分割数 {n_splits} 过多！")
+            print(f"   数据量: {n_bars} 根 K 线")
+            print(f"   IS 最小要求: {min_is_bars} 根")
+            print(f"   自动调整为 {max_possible_splits} 个分割")
+        n_splits = max_possible_splits
+
     bars_per_split = n_bars // n_splits
+
+    # 检查每个 split 的数据量是否足够
+    if bars_per_split < min_is_bars:
+        # 使用滚动窗口模式（IS 和 OOS 有重叠）
+        use_rolling_window = True
+        if verbose:
+            print(f"\n【WFO 模式】滚动窗口模式（IS/OOS 部分重叠）")
+            print(f"   原因: 单次分割 {bars_per_split} < IS 最小要求 {min_is_bars}")
+    else:
+        use_rolling_window = False
 
     # ========== 预热垫片大小 ==========
     # 指标计算需要历史数据，例如EMA_slow最大70，加上其他指标需要约100根
@@ -662,22 +723,33 @@ def run_walk_forward_optimization(
         print(f"\n{'='*70}")
         print(f"开始 Walk-Forward Optimization (带预热垫片)")
         print(f"总数据量: {n_bars} 根K线, 分割数: {n_splits}, 每轮试验: {n_trials}")
+        print(f"IS 最小要求: {min_is_bars} 根K线 (约 {min_is_bars/96/22:.1f} 个月)")
+        print(f"模式: {'滚动窗口' if use_rolling_window else '不重叠切分'}")
         print(f"预热垫片: {WARMUP_BARS} 根K线")
         print(f"{'='*70}\n")
 
     for i in range(n_splits - 1):
-        # ========== 数据分割（带预热垫片）==========
-        # IS数据: 当前split
-        is_start = i * bars_per_split
-        is_end = (i + 1) * bars_per_split
+        # ========== 数据分割 ==========
+        if use_rolling_window:
+            # 滚动窗口模式：IS 固定大小，OOS 紧随其后
+            is_start = i * (n_bars - min_is_bars) // (n_splits - 1) if n_splits > 1 else 0
+            is_end = is_start + min_is_bars
+            oos_start = is_end
+            oos_end = min(oos_start + bars_per_split, n_bars)
+        else:
+            # 不重叠切分模式
+            is_start = i * bars_per_split
+            is_end = (i + 1) * bars_per_split
+            oos_start = is_end
+            oos_end = (i + 2) * bars_per_split if i < n_splits - 2 else n_bars
+
+        # 边界检查
+        if is_end > n_bars or oos_start >= n_bars:
+            break
 
         # 带垫片切分：向左扩展WARMUP_BARS根K线用于指标预热
         is_padded_start = max(0, is_start - WARMUP_BARS)
         is_df_padded = df.iloc[is_padded_start:is_end].copy()
-
-        # OOS数据: 下一个split
-        oos_start = is_end
-        oos_end = (i + 2) * bars_per_split if i < n_splits - 2 else n_bars
 
         # OOS同样需要垫片（使用IS末尾数据）
         oos_padded_start = max(0, oos_start - WARMUP_BARS)
@@ -687,10 +759,20 @@ def run_walk_forward_optimization(
         is_warmup_offset = is_start - is_padded_start
         oos_warmup_offset = oos_start - oos_padded_start
 
+        # 实际评估的 K 线数
+        is_eval_bars = is_end - is_start
+        oos_eval_bars = oos_end - oos_start
+
         if verbose:
             print(f"\n--- WFO Split {i+1}/{n_splits-1} ---")
-            print(f"IS:  {df.index[is_start]} to {df.index[is_end-1]} ({is_end - is_start} bars, padded: {len(is_df_padded)}, warmup_offset: {is_warmup_offset})")
-            print(f"OOS: {df.index[oos_start]} to {df.index[min(oos_end-1, n_bars-1)]} ({oos_end - oos_start} bars, padded: {len(oos_df_padded)}, warmup_offset: {oos_warmup_offset})")
+            print(f"IS:  {df.index[is_start]} to {df.index[is_end-1]} ({is_eval_bars} bars)")
+            print(f"OOS: {df.index[oos_start]} to {df.index[min(oos_end-1, n_bars-1)]} ({oos_eval_bars} bars)")
+
+        # 检查 IS 数据量是否足够
+        if is_eval_bars < min_is_bars * 0.5:  # 允许 50% 容差
+            if verbose:
+                print(f"  ⚠️ IS 数据量不足 ({is_eval_bars} < {min_is_bars * 0.5}), 跳过此分割")
+            continue
 
         # ========== IS优化（带预热垫片的目标函数）==========
         def create_wfo_objective(df_padded, warmup_offset, eval_bars, min_trades):

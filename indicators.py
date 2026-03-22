@@ -72,14 +72,13 @@ def calculate_vwap(df: pd.DataFrame) -> pd.Series:
         # 外汇交易日定义：从美东时间 17:00 开始到次日 17:00
         # 在 17:00 之前的数据属于"前一天"的交易日
         # 在 17:00 及之后的数据属于"当天"的交易日
-        trading_date = index_et.normalize()  # 获取日期部分 (00:00)
+        # 【修复】使用 numpy array 避免修改 Index
+        trading_date = pd.Series(index_et.normalize().to_numpy(), index=df.index)
 
         # 对于 00:00-16:59 的数据，它们属于前一天的交易日
         # 对于 17:00-23:59 的数据，它们属于当天的交易日
-        for i in range(len(df)):
-            if hour_et[i] < FOREX_DAILY_RESET_HOUR_ET:
-                # 17:00 之前的数据，归属于前一天的交易日
-                trading_date[i] = trading_date[i] - pd.Timedelta(days=1)
+        mask_before_17 = hour_et < FOREX_DAILY_RESET_HOUR_ET
+        trading_date.loc[mask_before_17] = trading_date.loc[mask_before_17] - pd.Timedelta(days=1)
 
     else:
         # 无时区信息时，假设数据为北京时间 (UTC+8)
@@ -103,14 +102,13 @@ def calculate_vwap(df: pd.DataFrame) -> pd.Series:
         # - 冬令时：北京时间次日 06:00
         # - 夏令时：北京时间次日 05:00
         # 近似使用 05:30 作为全年分界点（平均误差 < 30分钟）
-        trading_date = index_beijing.normalize()
+        # 【修复】使用 numpy array 避免修改 Index
+        trading_date = pd.Series(index_beijing.normalize().to_numpy(), index=df.index)
 
-        for i in range(len(df)):
-            total_minutes = hour_beijing[i] * 60 + minute_beijing[i]
-            # 05:30 = 5*60 + 30 = 330 分钟
-            if total_minutes < 330:  # 00:00 - 05:29
-                # 归属于前一天的交易日
-                trading_date[i] = trading_date[i] - pd.Timedelta(days=1)
+        total_minutes = hour_beijing * 60 + minute_beijing
+        # 05:30 = 5*60 + 30 = 330 分钟
+        mask_before_530 = total_minutes < 330  # 00:00 - 05:29
+        trading_date.loc[mask_before_530] = trading_date.loc[mask_before_530] - pd.Timedelta(days=1)
 
     # 按交易日分组计算累计 VWAP
     unique_dates = trading_date.unique()
@@ -265,19 +263,27 @@ def calculate_squeeze_indicator(
     bb_lower: pd.Series,
     bb_middle: pd.Series,
     kc_upper: pd.Series,
-    kc_lower: pd.Series
+    kc_lower: pd.Series,
+    release_window: int = 5
 ) -> Tuple[pd.Series, pd.Series]:
     """
     计算波动率挤压指标
 
+    【修复3.1】Squeeze Release 窗口化
+    - 不再仅限交叉那根K线
+    - 只要处于挤压释放状态 (bb_upper > kc_upper)
+    - 且距离交叉发生不超过 release_window 根K线
+    - 都视为有效的突破窗口
+
     Args:
         bb_upper, bb_lower, bb_middle: 布林带轨道
         kc_upper, kc_lower: 肯特纳通道轨道
+        release_window: 释放窗口期（默认5根K线）
 
     Returns:
         (squeeze_state, squeeze_release)
         squeeze_state: < 0 表示挤压（震荡），> 0 表示释放（趋势）
-        squeeze_release: True表示波动率爆发
+        squeeze_release: True表示处于有效突破窗口期
     """
     # 计算带宽比值
     bb_width = (bb_upper - bb_lower) / bb_middle
@@ -286,58 +292,119 @@ def calculate_squeeze_indicator(
     # 挤压状态
     squeeze_ratio = bb_width / kc_width
 
-    # 判断挤压释放
-    # 布林带突破肯特纳通道
-    squeeze_release_up = (bb_upper > kc_upper) & (bb_upper.shift(1) <= kc_upper.shift(1))
-    squeeze_release_down = (bb_lower < kc_lower) & (bb_lower.shift(1) >= kc_lower.shift(1))
-    squeeze_release = squeeze_release_up | squeeze_release_down
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【修复3.1】窗口化 Squeeze Release
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # 判断是否处于释放状态（布林带突破肯特纳通道）
+    is_released_up = bb_upper > kc_upper
+    is_released_down = bb_lower < kc_lower
+    is_released = is_released_up | is_released_down
+
+    # 检测交叉点（从挤压变为释放的那根K线）
+    was_squeezed_up = (bb_upper.shift(1) <= kc_upper.shift(1))
+    was_squeezed_down = (bb_lower.shift(1) >= kc_lower.shift(1))
+
+    cross_up = is_released_up & was_squeezed_up
+    cross_down = is_released_down & was_squeezed_down
+    cross_point = cross_up | cross_down
+
+    # 使用滚动窗口：距离交叉点 <= release_window 根K线
+    # 创建一个 Series 记录最近的交叉点位置
+    squeeze_release = pd.Series(False, index=bb_upper.index)
+
+    # 标记所有在释放窗口期内的K线
+    for i in range(len(bb_upper)):
+        if is_released.iloc[i]:
+            # 检查过去 release_window 根K线内是否有交叉
+            start_idx = max(0, i - release_window)
+            if cross_point.iloc[start_idx:i+1].any():
+                squeeze_release.iloc[i] = True
 
     return squeeze_ratio, squeeze_release
 
 
 def calculate_session_filter(
     df: pd.DataFrame,
-    asian_start: int = 6,
-    asian_end: int = 14,
-    european_start: int = 15,
-    european_end: int = 24
+    data_timezone: str = None,
+    asian_start_utc: int = 0,
+    asian_end_utc: int = 8,
+    european_start_utc: int = 8,
+    european_end_utc: int = 22
 ) -> Tuple[pd.Series, pd.Series]:
     """
     计算交易时段过滤器
 
-    【修复2.1】增加时区校验
-    - 参数默认为北京时间 (UTC+8)
-    - 如果数据时区不匹配，发出警告
+    【修复3.2】重构时区处理 - 移除硬编码北京时间依赖
+    - 所有时段判定基于 UTC 时间
+    - 调用者必须明确传入数据的时区
+    - 与 MT4 实盘对接时绝对一致
+
+    MT4 服务器时间（标准）:
+    - 夏令时: UTC+3
+    - 冬令时: UTC+2
+
+    UTC 时段定义:
+    - 亚盘 (东京/悉尼): UTC 00:00 - 08:00
+    - 欧美盘 (伦敦/纽约): UTC 08:00 - 22:00
 
     Args:
-        df: 带有时区感知时间索引的DataFrame
-        asian_start, asian_end: 亚盘时段（北京时间 UTC+8）
-        european_start, european_end: 欧美盘时段（北京时间 UTC+8）
+        df: 带有时间索引的 DataFrame
+        data_timezone: 数据的时区 (如 'Asia/Shanghai', 'UTC', 'America/New_York')
+                      如果为 None，假设索引已经是 UTC
+        asian_start_utc: 亚盘开始时间 (UTC)
+        asian_end_utc: 亚盘结束时间 (UTC)
+        european_start_utc: 欧美盘开始时间 (UTC)
+        european_end_utc: 欧美盘结束时间 (UTC)
 
     Returns:
         (is_asian_session, is_european_session)
     """
-    # 【修复2.1】时区校验
-    if df.index.tz is None:
-        warnings.warn(
-            "【时区警告】数据索引无时区信息！时段判断可能错误。\n"
-            f"参数设定为北京时间: 亚盘 {asian_start}:00-{asian_end}:00\n"
-            "请确保数据已正确转换为北京时间 (UTC+8)"
-        )
-    elif str(df.index.tz) != BEIJING_TZ:
-        # 转换为北京时间
-        warnings.warn(
-            f"【时区转换】数据时区为 {df.index.tz}，转换为北京时间 {BEIJING_TZ}"
-        )
-        df = df.copy()
-        df.index = df.index.tz_convert(BEIJING_TZ)
+    # 获取时间索引
+    idx = df.index.copy()
 
-    hour = df.index.hour
+    # ═══════════════════════════════════════════════════════════════════════
+    # 【修复3.2】统一转换为 UTC 时间
+    # ═══════════════════════════════════════════════════════════════════════
 
-    is_asian = (hour >= asian_start) & (hour < asian_end)
+    if idx.tz is None:
+        if data_timezone is not None:
+            # 为 naive 时间戳添加时区信息
+            if PYTZ_AVAILABLE:
+                tz = pytz.timezone(data_timezone)
+                idx = idx.tz_localize(tz)
+                warnings.warn(
+                    f"【时区标注】数据索引已标注为 {data_timezone}，将转换为 UTC\n"
+                    f"亚盘: UTC {asian_start_utc}:00-{asian_end_utc}:00\n"
+                    f"欧美盘: UTC {european_start_utc}:00-{european_end_utc}:00"
+                )
+            else:
+                warnings.warn(
+                    "【时区警告】pytz 未安装，无法进行时区转换。\n"
+                    "假设数据已经是 UTC 时间。"
+                )
+        else:
+            # 无时区信息，假设为 UTC
+            warnings.warn(
+                "【时区警告】数据索引无时区信息且未指定 data_timezone。\n"
+                "假设数据已经是 UTC 时间。段判定可能不准确。"
+            )
+    else:
+        # 已经有时区信息，转换为 UTC
+        idx = idx.tz_convert(UTC_TZ)
 
-    # 欧美盘可能跨越午夜
-    is_european = (hour >= european_start) | (hour < (european_end - 24) % 24)
+    # 获取 UTC 小时
+    hour_utc = idx.hour
+
+    # 基于 UTC 时间判定时段
+    is_asian = (hour_utc >= asian_start_utc) & (hour_utc < asian_end_utc)
+
+    # 欧美盘可能跨越午夜 (22:00 后进入次日亚盘)
+    if european_end_utc > 24:
+        # 跨午夜情况
+        is_european = (hour_utc >= european_start_utc) | (hour_utc < (european_end_utc - 24) % 24)
+    else:
+        is_european = (hour_utc >= european_start_utc) & (hour_utc < european_end_utc)
 
     return is_asian, is_european
 
@@ -408,13 +475,16 @@ def add_all_indicators(
     # 波动率挤压指标
     squeeze_ratio, squeeze_release = calculate_squeeze_indicator(
         df['BB_Upper'], df['BB_Lower'], df['BB_Middle'],
-        df['KC_Upper'], df['KC_Lower']
+        df['KC_Upper'], df['KC_Lower'],
+        release_window=5  # 【修复3.1】窗口化 Squeeze Release
     )
     df['Squeeze_Ratio'] = squeeze_ratio
     df['Squeeze_Release'] = squeeze_release
 
-    # 交易时段
-    is_asian, is_european = calculate_session_filter(df)
+    # 交易时段（【修复3.2】使用 UTC 时间）
+    # 参数 data_timezone 从 params 获取，默认假设为 UTC
+    data_timezone = params.get('data_timezone', None)
+    is_asian, is_european = calculate_session_filter(df, data_timezone=data_timezone)
     df['Is_Asian'] = is_asian
     df['Is_European'] = is_european
 
