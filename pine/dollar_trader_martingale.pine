@@ -1,0 +1,232 @@
+// XAUUSD Dollar Trader Martingale Strategy - Pine Script v6
+// 策略: 三线SMA趋势跟踪 (20/50/200) + 马丁格尔仓位管理
+// 核心逻辑:
+//   - 多头开仓: C > SMA_20 > SMA_50 > SMA_200
+//   - 空头开仓: C < SMA_20 < SMA_50 < SMA_200
+//   - 多头平仓: SMA_20 < SMA_50 (死叉)
+//   - 空头平仓: SMA_20 > SMA_50 (金叉)
+//
+// 马丁格尔特性:
+//   - 基础仓位: positionSize
+//   - 亏损后翻倍: 第N次交易仓位 = positionSize * multiplier^(N-1)
+//   - 盈利后重置: 回到基础仓位
+//   - 最大连续亏损次数限制: maxMartingaleSteps
+//
+// 【关键一致性设置】
+// - process_orders_on_close=false: 确保在K线开盘时执行
+// - 使用 strategy.entry 执行入场订单
+// - 使用 [1] 位移获取上一根K线数据判断，避免未来函数
+
+//@version=6
+strategy("XAUUSD Dollar Trader Martingale (SMA 20/50/200)", overlay=true,
+         initial_capital=100000,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=7.0,  // $3.5 单边 = $7 往返
+         slippage=10,           // 10点 = $0.1
+         calc_on_every_tick=false,
+         process_orders_on_close=false,  // 【关键】在K线开盘时执行订单
+         max_lines_count=500,
+         max_labels_count=500)
+
+// ============================================
+// 参数设置
+// ============================================
+smaShortPeriod = input.int(20, "短期SMA周期", minval=10, maxval=30, group="SMA参数")
+smaMediumPeriod = input.int(50, "中期SMA周期", minval=30, maxval=70, group="SMA参数")
+smaLongPeriod = input.int(200, "长期SMA周期", minval=100, maxval=300, group="SMA参数")
+
+// 马丁格尔参数
+groupMartingale = "马丁格尔参数"
+positionSize = input.float(1.0, "基础仓位", minval=0.1, maxval=10.0, step=0.1, group=groupMartingale)
+martingaleMultiplier = input.float(2.0, "马丁格尔倍数", minval=1.1, maxval=5.0, step=0.1, group=groupMartingale)
+maxMartingaleSteps = input.int(5, "最大连续翻倍次数", minval=1, maxval=10, group=groupMartingale)
+
+// ============================================
+// 指标计算
+// ============================================
+// 计算三条SMA (实时值)
+smaShort = ta.sma(close, smaShortPeriod)
+smaMedium = ta.sma(close, smaMediumPeriod)
+smaLong = ta.sma(close, smaLongPeriod)
+
+// ============================================
+// 【关键】使用上一根K线(已收盘)的数据判断信号
+// 对应 Python: df.iloc[current_idx - 1]
+// ============================================
+prevClose = close[1]
+prevSMA_S = smaShort[1]
+prevSMA_M = smaMedium[1]
+prevSMA_L = smaLong[1]
+
+// 前两根K线的SMA值 (用于判断交叉)
+prev2SMA_S = smaShort[2]
+prev2SMA_M = smaMedium[2]
+
+// ============================================
+// 趋势判断 (基于上一根K线)
+// ============================================
+// 多头排列: C > SMA_S > SMA_M > SMA_L
+isBullish = (prevClose > prevSMA_S) and (prevSMA_S > prevSMA_M) and (prevSMA_M > prevSMA_L)
+
+// 空头排列: C < SMA_S < SMA_M < SMA_L
+isBearish = (prevClose < prevSMA_S) and (prevSMA_S < prevSMA_M) and (prevSMA_M < prevSMA_L)
+
+// ============================================
+// 交叉判断 (用于出场)
+// ============================================
+// 短期下穿中期 (死叉) - 多头平仓信号
+smaBearishCross = (prev2SMA_S >= prev2SMA_M) and (prevSMA_S < prevSMA_M)
+
+// 短期上穿中期 (金叉) - 空头平仓信号
+smaBullishCross = (prev2SMA_S <= prev2SMA_M) and (prevSMA_S > prevSMA_M)
+
+// ============================================
+// 获取策略持仓状态
+// ============================================
+bool hasLongPosition = strategy.position_size > 0
+bool hasShortPosition = strategy.position_size < 0
+bool hasPosition = hasLongPosition or hasShortPosition
+
+// ============================================
+// 马丁格尔状态管理
+// ============================================
+// 使用 var 关键字保持状态跨K线
+var int consecutiveLosses = 0
+var float lastTradeProfit = 0.0
+
+// 计算当前马丁格尔仓位
+float currentPositionSize = positionSize * math.pow(martingaleMultiplier, math.min(consecutiveLosses, maxMartingaleSteps))
+
+// ============================================
+// 检测交易完成并更新马丁格尔状态
+// ============================================
+// 检测仓位变化 (从有到无表示平仓)
+bool wasLongExit = hasLongPosition[1] and not hasLongPosition
+bool wasShortExit = hasShortPosition[1] and not hasShortPosition
+bool wasExit = wasLongExit or wasShortExit
+
+// 获取当前盈亏 (只在平仓时更新)
+float currentProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+
+// 更新马丁格尔状态
+if wasExit
+    // 判断盈亏
+    if currentProfit > 0
+        // 盈利: 重置连续亏损计数
+        if consecutiveLosses > 0
+            consecutiveLosses := 0
+    else
+        // 亏损: 增加连续亏损计数
+        consecutiveLosses := consecutiveLosses + 1
+
+// ============================================
+// 【关键】出场逻辑 - 使用 strategy.close 在开盘价执行
+// ============================================
+// 多头出场: SMA_20下穿SMA_50
+if hasLongPosition and smaBearishCross
+    // 平仓后如果趋势转空，立即开空仓
+    if isBearish
+        strategy.close("Long", comment="SMA死叉反向")
+    else
+        strategy.close("Long", comment="SMA死叉平仓")
+
+// 空头出场: SMA_20上穿SMA_50
+if hasShortPosition and smaBullishCross
+    // 平仓后如果趋势转多，立即开多仓
+    if isBullish
+        strategy.close("Short", comment="SMA金叉反向")
+    else
+        strategy.close("Short", comment="SMA金叉平仓")
+
+// ============================================
+// 【关键】入场逻辑 - 使用 strategy.entry 在开盘价执行
+// ============================================
+// 注意: process_orders_on_close=false 确保在K线开盘时执行
+
+// 多头入场
+if not hasPosition and isBullish
+    strategy.entry("Long", strategy.long, qty=currentPositionSize, comment="多头排列_M" + str.tostring(consecutiveLosses))
+
+// 空头入场
+if not hasPosition and isBearish
+    strategy.entry("Short", strategy.short, qty=currentPositionSize, comment="空头排列_M" + str.tostring(consecutiveLosses))
+
+// 反向开仓 (持有多头时收到空头信号)
+if hasLongPosition and isBearish and smaBearishCross
+    strategy.entry("Short", strategy.short, qty=currentPositionSize, comment="多转空_M" + str.tostring(consecutiveLosses))
+
+// 反向开仓 (持有空头时收到多头信号)
+if hasShortPosition and isBullish and smaBullishCross
+    strategy.entry("Long", strategy.long, qty=currentPositionSize, comment="空转多_M" + str.tostring(consecutiveLosses))
+
+// ============================================
+// 绘图
+// ============================================
+plot(smaShort, "SMA_20", color=color.new(color.blue, 20), linewidth=2)
+plot(smaMedium, "SMA_50", color=color.new(color.orange, 20), linewidth=2)
+plot(smaLong, "SMA_200", color=color.new(color.red, 20), linewidth=1)
+
+// 信号标记 (在当前K线显示)
+plotshape(isBullish and not hasPosition[1] and hasPosition, "Long Entry",
+          shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(isBearish and not hasPosition[1] and hasPosition, "Short Entry",
+          shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// ============================================
+// 信息面板
+// ============================================
+var table infoPanel = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 80), border_width=1)
+
+if barstate.islast
+    table.cell(infoPanel, 0, 0, "趋势状态", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 1, "SMA_20", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 2, "SMA_50", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 3, "SMA_200", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 4, "持仓", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 5, "信号", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 6, "马丁层级", text_color=color.white, text_size=size.small)
+    table.cell(infoPanel, 0, 7, "当前仓位", text_color=color.white, text_size=size.small)
+
+    // 趋势状态颜色
+    trendColor = isBullish ? color.green : (isBearish ? color.red : color.gray)
+    trendText = isBullish ? "多头" : (isBearish ? "空头" : "震荡")
+
+    // 持仓状态
+    positionText = hasLongPosition ? "多头" : (hasShortPosition ? "空头" : "空仓")
+    positionColor = hasLongPosition ? color.green : (hasShortPosition ? color.red : color.gray)
+
+    // 信号状态
+    signalText = "无"
+    signalColor = color.gray
+    if isBullish and not hasPosition
+        signalText := "开多"
+        signalColor := color.green
+    else if isBearish and not hasPosition
+        signalText := "开空"
+        signalColor := color.red
+    else if hasLongPosition and smaBearishCross
+        signalText := "平多"
+        signalColor := color.orange
+    else if hasShortPosition and smaBullishCross
+        signalText := "平空"
+        signalColor := color.orange
+
+    // 马丁层级颜色
+    martingaleColor = consecutiveLosses == 0 ? color.green : (consecutiveLosses >= 3 ? color.red : color.orange)
+
+    table.cell(infoPanel, 1, 0, trendText, text_color=trendColor, text_size=size.small)
+    table.cell(infoPanel, 1, 1, str.tostring(smaShort, "#.##"), text_color=color.blue, text_size=size.small)
+    table.cell(infoPanel, 1, 2, str.tostring(smaMedium, "#.##"), text_color=color.orange, text_size=size.small)
+    table.cell(infoPanel, 1, 3, str.tostring(smaLong, "#.##"), text_color=color.red, text_size=size.small)
+    table.cell(infoPanel, 1, 4, positionText, text_color=positionColor, text_size=size.small)
+    table.cell(infoPanel, 1, 5, signalText, text_color=signalColor, text_size=size.small)
+    table.cell(infoPanel, 1, 6, str.tostring(consecutiveLosses), text_color=martingaleColor, text_size=size.small)
+    table.cell(infoPanel, 1, 7, str.tostring(currentPositionSize, "#.##"), text_color=color.yellow, text_size=size.small)
+
+// 背景色标注趋势 (仅在上一根K线)
+bgcolor(isBullish[1] ? color.new(color.green, 95) : (isBearish[1] ? color.new(color.red, 95) : na))
+
+// 马丁格尔层级背景色提示
+bgcolor(consecutiveLosses > 0 ? color.new(color.orange, 95 - consecutiveLosses * 5) : na, title="马丁格尔层级")

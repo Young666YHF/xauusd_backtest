@@ -1,289 +1,191 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// Copyright © 2026 XAUUSD Dual Strategy
+// Copyright © 2026 XAUUSD Triple Strategy
+//
+// 2026-03-24 v6.0 新增策略C (SMA角度突破):
+// - 【新增】策略C: SMA角度(ATR标准化) + K线突破
+// - 【新增】角度计算: θ = atan((SMA[t]-SMA[t-n])/(ATR[t]*n)) * (180/π)
+// - 【新增】突破确认: 突破前N根K线高低点
 //
 // 2026-03-22 v5.2 核心逻辑缺陷修复:
-// - 【修复1】并发持仓: 策略A和策略B独立状态追踪，允许同时开仓
-// - 【修复3】Stop Order: 移除未来函数延迟，直接使用stop参数让撮合引擎处理
-//
-// 2026-03-21 v5.0 Critical Fixes:
-// - 增加每日熔断机制 (Daily Circuit Breaker)
-// - DST 动态感知 (Asia/Shanghai 时区)
-// - 非对称滑点模型 (止损惩罚，止盈无负滑点)
-// - 新闻事件过滤器 (Volume/ATR 突变检测)
+// - 【修复】并发持仓: 策略A/B/C独立状态追踪
 
 //@version=6
-strategy("XAUUSD Dual Strategy v5", overlay=true,
+strategy("XAUUSD Triple Strategy v6", overlay=true,
          initial_capital=100000,
          default_qty_type=strategy.fixed,
          default_qty_value=1,
          commission_type=strategy.commission.cash_per_contract,
          commission_value=0.6,
          slippage=1,
-         pyramiding=0,
-         close_entries_rule="ANY")
+         pyramiding=0)
 
 // ============================================
-// 参数设置 (贝叶斯优化 - Optuna TPE 200次)
-// 与Python Tick引擎微观执行对齐 - 2026-03-21 重构
+// 策略参数
 // ============================================
 
-// 布林带参数
-bb_period = input.int(13, "布林带周期", minval=5, maxval=50, group="布林带")
-bb_std = input.float(1.62, "布林带标准差", minval=1.0, maxval=4.0, step=0.01, group="布林带")
+// 布林带参数 (策略A)
+bb_period = input.int(20, "布林带周期", minval=5, maxval=50, group="策略A - 均值回归")
+bb_std = input.float(2.0, "布林带标准差", minval=1.0, maxval=4.0, step=0.01, group="策略A - 均值回归")
+rsi_period = input.int(14, "RSI周期", minval=5, maxval=30, group="策略A - 均值回归")
+rsi_oversold = input.int(25, "RSI超卖阈值", minval=10, maxval=40, group="策略A - 均值回归")
+rsi_overbought = input.int(75, "RSI超买阈值", minval=60, maxval=90, group="策略A - 均值回归")
+stop_loss_atr_mult_a = input.float(1.0, "止损ATR倍数", minval=0.5, maxval=5.0, step=0.01, group="策略A - 均值回归")
+max_hold_bars_a = input.int(5, "最大持仓K线数", minval=3, maxval=15, group="策略A - 均值回归")
 
-// 肯特纳通道参数
-kc_period = input.int(25, "肯特纳周期", minval=5, maxval=50, group="肯特纳通道")
-kc_atr_mult = input.float(1.30, "肯特纳ATR倍数", minval=0.5, maxval=4.0, step=0.01, group="肯特纳通道")
+// EMA参数 (策略B)
+ema_fast_len = input.int(20, "EMA快线周期", minval=5, maxval=50, group="策略B - 动量突破")
+ema_slow_len = input.int(50, "EMA慢线周期", minval=20, maxval=100, group="策略B - 动量突破")
+stop_loss_atr_mult_b = input.float(1.2, "止损ATR倍数", minval=0.5, maxval=5.0, step=0.01, group="策略B - 动量突破")
+trailing_stop_atr_mult = input.float(2.5, "追踪止损ATR倍数", minval=1.0, maxval=8.0, step=0.01, group="策略B - 动量突破")
 
-// ATR参数
-atr_period = input.int(19, "ATR周期", minval=5, maxval=30, group="通用")
+// 策略C参数 (SMA角度突破)
+sma_period_c = input.int(20, "SMA周期", minval=10, maxval=50, group="策略C - 趋势角度突破")
+angle_lookback_c = input.int(5, "角度回看K线数", minval=3, maxval=10, group="策略C - 趋势角度突破")
+angle_threshold_c = input.float(3.0, "角度阈值(度)", minval=1.0, maxval=10.0, step=0.5, group="策略C - 趋势角度突破")
+breakout_lookback_c = input.int(2, "突破回看K线数", minval=1, maxval=5, group="策略C - 趋势角度突破")
+use_fixed_exit_c = input.bool(true, "使用固定盈亏比出场", group="策略C - 趋势角度突破")
+risk_reward_ratio_c = input.float(2.0, "盈亏比", minval=1.0, maxval=4.0, step=0.1, group="策略C - 趋势角度突破")
+stop_loss_atr_mult_c = input.float(2.0, "止损ATR倍数", minval=1.0, maxval=4.0, step=0.1, group="策略C - 趋势角度突破")
 
-// RSI参数
-rsi_period = input.int(21, "RSI周期", minval=5, maxval=30, group="RSI")
-rsi_oversold = input.int(23, "RSI超卖阈值", minval=10, maxval=40, group="RSI")
-rsi_overbought = input.int(77, "RSI超买阈值", minval=60, maxval=90, group="RSI")
+// 通用参数
+atr_period = input.int(14, "ATR周期", minval=5, maxval=30, group="通用")
 
-// EMA参数
-ema_fast_len = input.int(17, "EMA快线周期", minval=5, maxval=50, group="EMA")
-ema_slow_len = input.int(32, "EMA慢线周期", minval=20, maxval=100, group="EMA")
-
-// 策略A参数 (均值回归)
-grp_a = "策略A - 均值回归"
-stop_loss_atr_mult_a = input.float(1.36, "止损ATR倍数", minval=0.5, maxval=5.0, step=0.01, group=grp_a)
-max_hold_bars_a = input.int(7, "最大持仓K线数", minval=4, maxval=30, group=grp_a)
-
-// 策略B参数 (动量突破)
-grp_b = "策略B - 动量突破"
-stop_loss_atr_mult_b = input.float(1.69, "止损ATR倍数", minval=0.5, maxval=5.0, step=0.01, group=grp_b)
-trailing_stop_atr_mult = input.float(4.54, "追踪止损ATR倍数", minval=1.0, maxval=8.0, step=0.01, group=grp_b)
-
-// 波动率过滤器
-squeeze_threshold = input.float(0.96, "波动率挤压阈值", minval=0.5, maxval=2.0, step=0.01, group="通用")
-
-// Module 1 & 2 高级参数
-grp_adv = "高级参数 (Module 1&2)"
-atr_time_stop_base = input.float(2.71, "ATR时间止损基础", minval=1.0, maxval=5.0, step=0.01, group=grp_adv)
-atr_time_stop_mult = input.float(0.76, "ATR时间止损倍数", minval=0.1, maxval=2.0, step=0.01, group=grp_adv)
-volatility_filter_period = input.int(14, "波动率过滤周期", minval=5, maxval=30, group=grp_adv)
-volatility_filter_mult = input.float(1.79, "波动率过滤倍数", minval=1.0, maxval=3.0, step=0.01, group=grp_adv)
-pullback_confirmation_bars = input.int(3, "回踩确认K线数", minval=1, maxval=5, group=grp_adv)
-ema_momentum_threshold = input.float(0.00082, "EMA动能阈值", minval=0.0001, maxval=0.01, step=0.00001, group=grp_adv)
-
-// 交易时段设置 (北京时间 UTC+8)
+// 交易时段设置
 grp_time = "交易时段"
 asian_start = input.int(6, "亚盘开始(北京时间)", minval=0, maxval=23, group=grp_time)
 asian_end = input.int(14, "亚盘结束(北京时间)", minval=0, maxval=23, group=grp_time)
 european_start = input.int(15, "欧美盘开始(北京时间)", minval=0, maxval=23, group=grp_time)
-european_end = input.int(0, "欧美盘结束(北京时间)", minval=0, maxval=6, group=grp_time)
+european_end = input.int(2, "欧美盘结束(北京时间)", minval=0, maxval=6, group=grp_time)
 
 // 策略开关
 enable_strategy_a = input.bool(true, "启用策略A (均值回归)", group="开关")
 enable_strategy_b = input.bool(true, "启用策略B (动量突破)", group="开关")
-
-// 【Critical Fix 4】熔断机制参数
-grp_circuit = "熔断机制"
-enable_circuit_breaker = input.bool(true, "启用每日熔断", group=grp_circuit)
-daily_max_drawdown_pct = input.float(3.0, "每日最大亏损%", minval=1.0, maxval=10.0, step=0.5, group=grp_circuit)
-
-// 【Critical Fix 4】新闻事件过滤参数
-grp_news = "新闻事件过滤"
-enable_news_filter = input.bool(true, "启用新闻过滤", group=grp_news)
-news_volume_spike_mult = input.float(3.0, "Volume突变倍数", minval=1.5, maxval=5.0, step=0.5, group=grp_news)
-news_atr_spike_mult = input.float(2.5, "ATR突变倍数", minval=1.5, maxval=5.0, step=0.5, group=grp_news)
+enable_strategy_c = input.bool(true, "启用策略C (趋势角度突破)", group="开关")
 
 // ============================================
 // 技术指标计算
 // ============================================
 
+// 布林带
 bb_middle = ta.sma(close, bb_period)
 bb_std_dev = ta.stdev(close, bb_period)
 bb_upper = bb_middle + bb_std * bb_std_dev
 bb_lower = bb_middle - bb_std * bb_std_dev
 
+// ATR和RSI
 atr = ta.atr(atr_period)
 rsi = ta.rsi(close, rsi_period)
+
+// EMA (策略B)
 ema_fast_val = ta.ema(close, ema_fast_len)
 ema_slow_val = ta.ema(close, ema_slow_len)
 
-kc_middle = ta.ema(close, kc_period)
-kc_upper = kc_middle + kc_atr_mult * atr
-kc_lower = kc_middle - kc_atr_mult * atr
+// 策略C SMA
+sma_c = ta.sma(close, sma_period_c)
+sma_c_prev = sma_c[angle_lookback_c]
 
-vwap_val = ta.vwap(close)
+// VWAP
+vwap_val = ta.vwap(hlc3)
 
-bb_width = (bb_upper - bb_lower) / bb_middle
-kc_width = (kc_upper - kc_lower) / bb_middle
-squeeze_ratio = bb_width / kc_width
-
-squeeze_release_up = (bb_upper > kc_upper) and (bb_upper[1] <= kc_upper[1])
-squeeze_release_down = (bb_lower < kc_lower) and (bb_lower[1] >= kc_lower[1])
-squeeze_release = squeeze_release_up or squeeze_release_down
-
-is_trend = squeeze_ratio >= squeeze_threshold
-is_range = squeeze_ratio < squeeze_threshold
-
-// 【任务3 修复】时区严格定义：使用 "Asia/Shanghai" 确保北京时间正确
+// ============================================
+// 时区判断
+// ============================================
 current_hour = hour(time, "Asia/Shanghai")
 is_asian_session = (current_hour >= asian_start) and (current_hour < asian_end)
 is_european_session = (current_hour >= european_start) or (current_hour < european_end)
 
 // ============================================
-// 【修复1】策略状态变量 - 策略A和策略B独立追踪
+// 策略C - SMA角度计算
+// ============================================
+// θ = atan((SMA[t] - SMA[t-n]) / (ATR[t] * n)) * (180/π)
+sma_diff_c = sma_c - sma_c_prev
+angle_rad_c = math.atan(sma_diff_c / (atr * angle_lookback_c))
+angle_deg_c = angle_rad_c * 180.0 / math.pi
+
+// 策略C - 计算前N根K线的高低点
+highest_n_c = ta.highest(high[1], breakout_lookback_c)
+lowest_n_c = ta.lowest(low[1], breakout_lookback_c)
+
+// ============================================
+// 策略状态变量
 // ============================================
 
-// 策略A状态变量
-var string strategy_a_state = ""  // "" | "LONG" | "SHORT"
+// 策略A状态
+var string strategy_a_state = ""
 var int bars_held_a = 0
 var float entry_price_a = 0.0
 var float fixed_stop_loss_a = 0.0
-var float avg_atr_at_entry_a = 0.0
 
-// 策略B状态变量
-var string strategy_b_state = ""  // "" | "LONG" | "SHORT"
+// 策略B状态
+var string strategy_b_state = ""
 var int bars_held_b = 0
 var float entry_price_b = 0.0
 var float fixed_stop_loss_b = 0.0
 var float highest_since_entry_b = 0.0
 var float lowest_since_entry_b = 1000000.0
-var float avg_atr_at_entry_b = 0.0
 
-// 策略B Stop Order 状态
-var bool pending_confirmation = false
-var int pending_direction = 0
-var float pending_breakout_high = 0.0
-var float pending_breakout_low = 0.0
-var float pending_atr = 0.0
-var float pending_prev_low = 0.0
-var float pending_prev_high = 0.0
-var int confirmation_bars_left = 0
+// 策略C状态
+var string strategy_c_state = ""
+var int bars_held_c = 0
+var float entry_price_c = 0.0
+var float highest_since_entry_c = 0.0
+var float lowest_since_entry_c = 1000000.0
 
-// ============================================
-// 异常波动过滤
-// ============================================
-
-avg_atr = ta.sma(atr, volatility_filter_period)
-current_range = high - low
-is_abnormal_volatility = current_range > avg_atr * volatility_filter_mult
+// 策略B挂单状态
+var int pending_order_id = 0
+var float pending_entry_price = 0.0
+var float pending_stop_loss = 0.0
+var int pending_bars = 0
 
 // ============================================
-// 【Critical Fix 4】新闻事件过滤器
+// 持仓状态检查
 // ============================================
-
-avg_tick_volume = ta.sma(volume, 20)
-avg_atr_20 = ta.sma(atr, 20)
-
-is_volume_spike = enable_news_filter and (volume > avg_tick_volume * news_volume_spike_mult)
-is_atr_spike = enable_news_filter and (atr > avg_atr_20 * news_atr_spike_mult)
-is_news_event = is_volume_spike or is_atr_spike
-
-// 新闻事件后暂停交易 (简化版：当前K线不交易)
-is_trading_paused = is_news_event
-
-// ============================================
-// 【Critical Fix 4】每日熔断机制
-// ============================================
-
-var float daily_start_equity = strategy.initial_capital
-var int last_circuit_check_day = -1
-var bool circuit_breaker_triggered = false
-
-// 获取当前日期 (北京时间)
-current_day = dayofmonth(time, "Asia/Shanghai")
-current_month = month(time, "Asia/Shanghai")
-current_year = year(time, "Asia/Shanghai")
-
-// 新的一天，重置熔断状态
-if current_day != last_circuit_check_day
-    daily_start_equity := strategy.equity
-    circuit_breaker_triggered := false
-    last_circuit_check_day := current_day
-
-// 检查熔断条件
-current_drawdown_pct = (daily_start_equity - strategy.equity) / daily_start_equity * 100
-if enable_circuit_breaker and current_drawdown_pct >= daily_max_drawdown_pct and not circuit_breaker_triggered
-    circuit_breaker_triggered := true
-
-// 熔断触发时平掉所有仓位
-if circuit_breaker_triggered and strategy.position_size != 0
-    strategy.close_all(comment="熔断平仓")
-
-// ============================================
-// ATR动态时间止损计算
-// ============================================
-
-calculate_dynamic_time_stop(entry_atr_val, avg_atr_val) =>
-    base_bars = atr_time_stop_base
-    if avg_atr_val > 0
-        atr_ratio = entry_atr_val / avg_atr_val
-        adjustment = int((atr_ratio - 1.0) * atr_time_stop_mult * base_bars)
-        dynamic_bars = int(base_bars) - adjustment
-        math.max(3, math.min(15, dynamic_bars))
-    else
-        int(base_bars)
-
-// ============================================
-// 【修复1】持仓状态 - 策略A和策略B独立
-// ============================================
-
 has_position_a = strategy_a_state != ""
 has_position_b = strategy_b_state != ""
+has_position_c = strategy_c_state != ""
 is_long_a = strategy_a_state == "LONG"
 is_short_a = strategy_a_state == "SHORT"
 is_long_b = strategy_b_state == "LONG"
 is_short_b = strategy_b_state == "SHORT"
+is_long_c = strategy_c_state == "LONG"
+is_short_c = strategy_c_state == "SHORT"
 
 // ============================================
-// 【Task 2.1 & 2.2】出场逻辑 (与Python Tick引擎对齐)
-// 【修复1】策略A和策略B独立出场
+// 出场逻辑
 // ============================================
 
 // === 策略A出场 ===
-var bool should_close_a = false
-var string close_reason_a = ""
-
 if has_position_a
     bars_held_a := bars_held_a + 1
 
     if is_long_a
-        // 止损: 最低价触及止损
         if low <= fixed_stop_loss_a
-            should_close_a := true
-            close_reason_a := "A止损"
-        // VWAP止盈: 用high而非close (Intrabar模拟)
+            strategy.close("Long_A", comment="A止损")
+            strategy_a_state := ""
+            bars_held_a := 0
         else if high >= vwap_val
-            should_close_a := true
-            close_reason_a := "A_VWAP止盈"
+            strategy.close("Long_A", comment="A_VWAP止盈")
+            strategy_a_state := ""
+            bars_held_a := 0
+        else if bars_held_a >= max_hold_bars_a
+            strategy.close("Long_A", comment="A时间止损")
+            strategy_a_state := ""
+            bars_held_a := 0
     else if is_short_a
         if high >= fixed_stop_loss_a
-            should_close_a := true
-            close_reason_a := "A止损"
+            strategy.close("Short_A", comment="A止损")
+            strategy_a_state := ""
+            bars_held_a := 0
         else if low <= vwap_val
-            should_close_a := true
-            close_reason_a := "A_VWAP止盈"
-
-    // ATR自适应动态时间止损
-    if not should_close_a
-        dynamic_max_bars = calculate_dynamic_time_stop(atr, avg_atr_at_entry_a)
-        if bars_held_a >= dynamic_max_bars
-            should_close_a := true
-            close_reason_a := "A_ATR动态时间止损"
-
-// 执行策略A平仓
-if should_close_a
-    strategy.close("Long_A", comment=close_reason_a)
-    strategy.close("Short_A", comment=close_reason_a)
-    strategy_a_state := ""
-    bars_held_a := 0
-    entry_price_a := 0.0
-    fixed_stop_loss_a := 0.0
-    avg_atr_at_entry_a := 0.0
-    should_close_a := false
-    close_reason_a := ""
+            strategy.close("Short_A", comment="A_VWAP止盈")
+            strategy_a_state := ""
+            bars_held_a := 0
+        else if bars_held_a >= max_hold_bars_a
+            strategy.close("Short_A", comment="A时间止损")
+            strategy_a_state := ""
+            bars_held_a := 0
 
 // === 策略B出场 ===
-var bool should_close_b = false
-var string close_reason_b = ""
-
 if has_position_b
     bars_held_b := bars_held_b + 1
     highest_since_entry_b := math.max(highest_since_entry_b, high)
@@ -291,186 +193,206 @@ if has_position_b
 
     if is_long_b
         if low <= fixed_stop_loss_b
-            should_close_b := true
-            close_reason_b := "B初始止损"
+            strategy.close("Long_B", comment="B初始止损")
+            strategy_b_state := ""
+            bars_held_b := 0
+            highest_since_entry_b := 0.0
         else
             trailing_stop = highest_since_entry_b - trailing_stop_atr_mult * atr
             if low <= trailing_stop and highest_since_entry_b > entry_price_b
-                should_close_b := true
-                close_reason_b := "B追踪止损"
-
+                strategy.close("Long_B", comment="B追踪止损")
+                strategy_b_state := ""
+                bars_held_b := 0
+                highest_since_entry_b := 0.0
     else if is_short_b
         if high >= fixed_stop_loss_b
-            should_close_b := true
-            close_reason_b := "B初始止损"
+            strategy.close("Short_B", comment="B初始止损")
+            strategy_b_state := ""
+            bars_held_b := 0
+            lowest_since_entry_b := 1000000.0
         else
             trailing_stop = lowest_since_entry_b + trailing_stop_atr_mult * atr
             if high >= trailing_stop and lowest_since_entry_b < entry_price_b
-                should_close_b := true
-                close_reason_b := "B追踪止损"
+                strategy.close("Short_B", comment="B追踪止损")
+                strategy_b_state := ""
+                bars_held_b := 0
+                lowest_since_entry_b := 1000000.0
 
-// 执行策略B平仓
-if should_close_b
-    strategy.close("Long_B", comment=close_reason_b)
-    strategy.close("Short_B", comment=close_reason_b)
-    strategy_b_state := ""
-    bars_held_b := 0
-    entry_price_b := 0.0
-    fixed_stop_loss_b := 0.0
-    highest_since_entry_b := 0.0
-    lowest_since_entry_b := 1000000.0
-    avg_atr_at_entry_b := 0.0
-    should_close_b := false
-    close_reason_b := ""
+// === 策略C出场 ===
+if has_position_c
+    bars_held_c := bars_held_c + 1
+    highest_since_entry_c := math.max(highest_since_entry_c, high)
+    lowest_since_entry_c := math.min(lowest_since_entry_c, low)
 
-// ============================================
-// 【修复3】策略B Stop Order 入场 - 移除未来函数延迟
-// 直接使用 stop order 让撮合引擎处理触价成交
-// ============================================
+    // 预计算止损距离以避免重复乘法
+    sl_distance_c = stop_loss_atr_mult_c * atr
 
-if pending_confirmation and not has_position_b
-    confirmation_bars_left := confirmation_bars_left - 1
-
-    if confirmation_bars_left < 0
-        // 挂单过期时，完整重置所有状态变量
-        pending_confirmation := false
-        pending_direction := 0
-        pending_breakout_high := 0.0
-        pending_breakout_low := 0.0
-        pending_atr := 0.0
-        confirmation_bars_left := 0
-
-    // 【修复3】多头: 直接使用 stop order，删除 high > pending_breakout_high 判断
-    if pending_direction == 1
-        entry_price_b := pending_breakout_high
-        atr_stop = entry_price_b - stop_loss_atr_mult_b * pending_atr
-        stop_price = math.max(atr_stop, pending_prev_low)
-
-        // 【修复3】直接调用 strategy.entry 带 stop 参数，让撮合引擎处理触价成交
-        strategy.entry("Long_B", strategy.long, stop=pending_breakout_high)
-
-        strategy_b_state := "LONG"
-        entry_price_b := entry_price_b
-        fixed_stop_loss_b := stop_price
-        bars_held_b := 0
-        highest_since_entry_b := high
-        lowest_since_entry_b := low
-        avg_atr_at_entry_b := avg_atr
-
-        pending_confirmation := false
-
-    // 【修复3】空头: 直接使用 stop order，删除 low < pending_breakout_low 判断
-    else if pending_direction == -1
-        entry_price_b := pending_breakout_low
-        atr_stop = entry_price_b + stop_loss_atr_mult_b * pending_atr
-        stop_price = math.min(atr_stop, pending_prev_high)
-
-        // 【修复3】直接调用 strategy.entry 带 stop 参数
-        strategy.entry("Short_B", strategy.short, stop=pending_breakout_low)
-
-        strategy_b_state := "SHORT"
-        entry_price_b := entry_price_b
-        fixed_stop_loss_b := stop_price
-        bars_held_b := 0
-        highest_since_entry_b := high
-        lowest_since_entry_b := low
-        avg_atr_at_entry_b := avg_atr
-
-        pending_confirmation := false
+    if is_long_c
+        // 固定止损出场
+        if strategy.position_avg_price - sl_distance_c >= low
+            strategy.close("Long_C", comment="C止损")
+            strategy_c_state := ""
+            bars_held_c := 0
+        // 固定止盈出场
+        else if use_fixed_exit_c and strategy.position_avg_price + risk_reward_ratio_c * sl_distance_c <= high
+            strategy.close("Long_C", comment="C止盈")
+            strategy_c_state := ""
+            bars_held_c := 0
+        // 追踪止损出场
+        else
+            trailing_stop_c = highest_since_entry_c - sl_distance_c
+            if low <= trailing_stop_c and highest_since_entry_c > entry_price_c
+                strategy.close("Long_C", comment="C追踪止损")
+                strategy_c_state := ""
+                bars_held_c := 0
+                highest_since_entry_c := 0.0
+    else if is_short_c
+        // 固定止损出场
+        if strategy.position_avg_price + sl_distance_c <= high
+            strategy.close("Short_C", comment="C止损")
+            strategy_c_state := ""
+            bars_held_c := 0
+        // 固定止盈出场
+        else if use_fixed_exit_c and strategy.position_avg_price - risk_reward_ratio_c * sl_distance_c >= low
+            strategy.close("Short_C", comment="C止盈")
+            strategy_c_state := ""
+            bars_held_c := 0
+        // 追踪止损出场
+        else
+            trailing_stop_c = lowest_since_entry_c + sl_distance_c
+            if high >= trailing_stop_c and lowest_since_entry_c < entry_price_c
+                strategy.close("Short_C", comment="C追踪止损")
+                strategy_c_state := ""
+                bars_held_c := 0
+                lowest_since_entry_c := 1000000.0
 
 // ============================================
-// 【修复1】入场信号 - 策略A和策略B独立判定
+// 策略B挂单管理
 // ============================================
-
-// 熔断触发或新闻暂停时，不产生新信号
-can_trade = not circuit_breaker_triggered and not is_trading_paused
-
-// 【修复1】策略A入场信号 - 仅检查策略A持仓
-long_signal_a = enable_strategy_a and is_asian_session and (close <= bb_lower) and (rsi < rsi_oversold) and not is_abnormal_volatility and not has_position_a and can_trade
-short_signal_a = enable_strategy_a and is_asian_session and (close >= bb_upper) and (rsi > rsi_overbought) and not is_abnormal_volatility and not has_position_a and can_trade
-
-// 【修复1】策略B入场信号 - 仅检查策略B持仓
-long_signal_b_raw = enable_strategy_b and is_european_session and (close > bb_upper) and (bb_upper > kc_upper) and (ema_fast_val > ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position_b and not pending_confirmation and can_trade
-short_signal_b_raw = enable_strategy_b and is_european_session and (close < bb_lower) and (bb_lower < kc_lower) and (ema_fast_val < ema_slow_val) and (is_trend or squeeze_release) and not is_abnormal_volatility and not has_position_b and not pending_confirmation and can_trade
+if pending_order_id != 0
+    pending_bars := pending_bars + 1
+    if pending_bars >= 4  // 4根K线后过期
+        strategy.cancel(pending_order_id)
+        pending_order_id := 0
+        pending_bars := 0
 
 // ============================================
-// 【修复1】策略A入场执行 - 独立状态追踪
+// 入场信号
 // ============================================
+
+// === 策略A入场 ===
+long_signal_a = enable_strategy_a and is_asian_session and (close[1] <= bb_lower[1]) and (rsi[1] < rsi_oversold) and not has_position_a
+short_signal_a = enable_strategy_a and is_asian_session and (close[1] >= bb_upper[1]) and (rsi[1] > rsi_overbought) and not has_position_a
 
 if long_signal_a
-    sl_anchor = math.min(close, bb_lower)
-    stop_price = sl_anchor - stop_loss_atr_mult_a * atr
-
+    sl_price = close - stop_loss_atr_mult_a * atr
+    tp_price = vwap_val > close ? vwap_val : close + math.abs(close - sl_price) * 2.0
     strategy.entry("Long_A", strategy.long)
-
     strategy_a_state := "LONG"
     entry_price_a := close
-    fixed_stop_loss_a := stop_price
+    fixed_stop_loss_a := sl_price
     bars_held_a := 0
-    avg_atr_at_entry_a := avg_atr
 
 if short_signal_a
-    sl_anchor = math.max(close, bb_upper)
-    stop_price = sl_anchor + stop_loss_atr_mult_a * atr
-
+    sl_price = close + stop_loss_atr_mult_a * atr
+    tp_price = vwap_val < close ? vwap_val : close - math.abs(close - sl_price) * 2.0
     strategy.entry("Short_A", strategy.short)
-
     strategy_a_state := "SHORT"
     entry_price_a := close
-    fixed_stop_loss_a := stop_price
+    fixed_stop_loss_a := sl_price
     bars_held_a := 0
-    avg_atr_at_entry_a := avg_atr
 
-// ============================================
-// 【修复1】策略B入场执行 - 独立状态追踪
-// ============================================
+// === 策略B入场 ===
+ema_bullish = ema_fast_val > ema_slow_val * 1.0005
+ema_bearish = ema_fast_val < ema_slow_val * 0.9995
 
-if long_signal_b_raw
-    pending_confirmation := true
-    pending_direction := 1
-    pending_breakout_high := high
-    pending_breakout_low := low
-    pending_atr := atr
-    pending_prev_low := low[1]
-    pending_prev_high := high[1]
-    confirmation_bars_left := pullback_confirmation_bars
+long_signal_b = enable_strategy_b and is_european_session and (close[1] > bb_upper[1]) and (close[2] <= bb_upper[2]) and ema_bullish and not has_position_b and pending_order_id == 0
+short_signal_b = enable_strategy_b and is_european_session and (close[1] < bb_lower[1]) and (close[2] >= bb_lower[2]) and ema_bearish and not has_position_b and pending_order_id == 0
 
-if short_signal_b_raw
-    pending_confirmation := true
-    pending_direction := -1
-    pending_breakout_high := high
-    pending_breakout_low := low
-    pending_atr := atr
-    pending_prev_low := low[1]
-    pending_prev_high := high[1]
-    confirmation_bars_left := pullback_confirmation_bars
+if long_signal_b
+    entry_price := high[1]
+    prev_low := low[2]
+    sl_price = math.max(entry_price - stop_loss_atr_mult_b * atr[1], prev_low)
+    pending_order_id := strategy.entry("Long_B", strategy.long, stop=entry_price)
+    pending_entry_price := entry_price
+    pending_stop_loss := sl_price
+    pending_bars := 0
+    strategy_b_state := "LONG"
+    entry_price_b := entry_price
+    fixed_stop_loss_b := sl_price
+    bars_held_b := 0
+    highest_since_entry_b := high
+    lowest_since_entry_b := low
+
+if short_signal_b
+    entry_price := low[1]
+    prev_high := high[2]
+    sl_price = math.min(entry_price + stop_loss_atr_mult_b * atr[1], prev_high)
+    pending_order_id := strategy.entry("Short_B", strategy.short, stop=entry_price)
+    pending_entry_price := entry_price
+    pending_stop_loss := sl_price
+    pending_bars := 0
+    strategy_b_state := "SHORT"
+    entry_price_b := entry_price
+    fixed_stop_loss_b := sl_price
+    bars_held_b := 0
+    highest_since_entry_b := high
+    lowest_since_entry_b := low
+
+// === 策略C入场 ===
+// 多头信号: 角度 > 阈值 且 突破前N根K线高点
+long_signal_c = enable_strategy_c and (angle_deg_c > angle_threshold_c) and (high > highest_n_c) and not has_position_c
+
+// 空头信号: 角度 < -阈值 且 跌破前N根K线低点
+short_signal_c = enable_strategy_c and (angle_deg_c < -angle_threshold_c) and (low < lowest_n_c) and not has_position_c
+
+if long_signal_c
+    sl_price = close - stop_loss_atr_mult_c * atr
+    tp_price = use_fixed_exit_c ? close + risk_reward_ratio_c * stop_loss_atr_mult_c * atr : na
+    strategy.entry("Long_C", strategy.long)
+    strategy_c_state := "LONG"
+    entry_price_c := close
+    bars_held_c := 0
+    highest_since_entry_c := high
+    lowest_since_entry_c := low
+
+if short_signal_c
+    sl_price = close + stop_loss_atr_mult_c * atr
+    tp_price = use_fixed_exit_c ? close - risk_reward_ratio_c * stop_loss_atr_mult_c * atr : na
+    strategy.entry("Short_C", strategy.short)
+    strategy_c_state := "SHORT"
+    entry_price_c := close
+    bars_held_c := 0
+    highest_since_entry_c := high
+    lowest_since_entry_c := low
 
 // ============================================
 // 绘图
 // ============================================
-
 plot(bb_upper, "BB上轨", color=color.new(color.blue, 30), linewidth=1)
 plot(bb_lower, "BB下轨", color=color.new(color.blue, 30), linewidth=1)
 plot(bb_middle, "BB中轨", color=color.new(color.blue, 60), linewidth=1)
-plot(kc_upper, "KC上轨", color=color.new(color.orange, 30), linewidth=1)
-plot(kc_lower, "KC下轨", color=color.new(color.orange, 30), linewidth=1)
 plot(vwap_val, "VWAP", color=color.new(color.purple, 0), linewidth=2)
 plot(ema_fast_val, "EMA快线", color=color.new(color.yellow, 0), linewidth=1)
 plot(ema_slow_val, "EMA慢线", color=color.new(color.red, 0), linewidth=1)
+plot(sma_c, "SMA_C", color=color.new(color.orange, 30), linewidth=1)
 
+// 策略信号标记
 plotshape(long_signal_a, "Long A", shape.triangleup, location.belowbar, color.green, size=size.tiny)
 plotshape(short_signal_a, "Short A", shape.triangledown, location.abovebar, color.red, size=size.tiny)
-plotshape(long_signal_b_raw, "Long B Signal", shape.diamond, location.belowbar, color.lime, size=size.tiny)
-plotshape(short_signal_b_raw, "Short B Signal", shape.diamond, location.abovebar, color.maroon, size=size.tiny)
+plotshape(long_signal_b, "Long B", shape.diamond, location.belowbar, color.lime, size=size.tiny)
+plotshape(short_signal_b, "Short B", shape.diamond, location.abovebar, color.maroon, size=size.tiny)
+plotshape(long_signal_c, "Long C", shape.circle, location.belowbar, color.aqua, size=size.small)
+plotshape(short_signal_c, "Short C", shape.circle, location.abovebar, color.fuchsia, size=size.small)
 
+// 时段背景
 bgcolor(is_asian_session ? color.new(color.yellow, 95) : na)
 bgcolor(is_european_session ? color.new(color.blue, 95) : na)
 
 // ============================================
 // 信息面板
 // ============================================
-
-var table panel = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80))
+var table panel = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 80))
 
 if barstate.islast
     table.cell(panel, 0, 0, "指标", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 50))
@@ -481,30 +403,36 @@ if barstate.islast
     table.cell(panel, 1, 1, str.tostring(rsi, "#.#"), text_color=rsi_color, text_size=size.small)
 
     table.cell(panel, 0, 2, "ATR", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 2, str.tostring(atr, "#.#"), text_color=color.white, text_size=size.small)
-
-    table.cell(panel, 0, 3, "Squeeze", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 3, str.tostring(squeeze_ratio, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 2, str.tostring(atr, "#.##"), text_color=color.white, text_size=size.small)
 
     session_txt = is_asian_session ? "亚盘" : is_european_session ? "欧美" : "其他"
-    table.cell(panel, 0, 4, "时段", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 4, session_txt, text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 3, "时段", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 3, session_txt, text_color=color.white, text_size=size.small)
 
-    table.cell(panel, 0, 5, "策略", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 5, current_strategy != "" ? "策略" + current_strategy : "-", text_color=color.white, text_size=size.small)
+    // 策略C角度显示
+    angle_color = math.abs(angle_deg_c) > angle_threshold_c ? (angle_deg_c > 0 ? color.green : color.red) : color.white
+    table.cell(panel, 0, 4, "C角度", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 4, str.tostring(angle_deg_c, "#.##") + "°", text_color=angle_color, text_size=size.small)
 
-    table.cell(panel, 0, 6, "持仓K线", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 6, str.tostring(bars_held), text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 5, "持仓A", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 5, has_position_a ? (is_long_a ? "多" : "空") : "无", text_color=has_position_a ? color.orange : color.gray, text_size=size.small)
 
-    pos_txt = is_long ? "多头" : is_short ? "空头" : "空仓"
-    pos_color = is_long ? color.green : is_short ? color.red : color.gray
-    table.cell(panel, 0, 7, "仓位", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 7, pos_txt, text_color=pos_color, text_size=size.small)
+    table.cell(panel, 0, 6, "持仓B", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 6, has_position_b ? (is_long_b ? "多" : "空") : "无", text_color=has_position_b ? color.orange : color.gray, text_size=size.small)
+
+    table.cell(panel, 0, 7, "持仓C", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 7, has_position_c ? (is_long_c ? "多" : "空") : "无", text_color=has_position_c ? color.aqua : color.gray, text_size=size.small)
+
+    table.cell(panel, 0, 8, "突破高", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 8, str.tostring(highest_n_c, "#.##"), text_color=color.white, text_size=size.small)
+
+    table.cell(panel, 0, 9, "突破低", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 9, str.tostring(lowest_n_c, "#.##"), text_color=color.white, text_size=size.small)
 
     pnl_pct = (strategy.equity / strategy.initial_capital - 1) * 100
     pnl_color = pnl_pct >= 0 ? color.green : color.red
-    table.cell(panel, 0, 8, "收益率", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 8, str.tostring(pnl_pct, "#.##") + "%", text_color=pnl_color, text_size=size.small)
+    table.cell(panel, 0, 10, "收益率", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 10, str.tostring(pnl_pct, "#.##") + "%", text_color=pnl_color, text_size=size.small)
 
-    table.cell(panel, 0, 9, "待确认", text_color=color.white, text_size=size.small)
-    table.cell(panel, 1, 9, pending_confirmation ? "是" : "否", text_color=color.white, text_size=size.small)
+    table.cell(panel, 0, 11, "版本", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 11, "v6.0", text_color=color.yellow, text_size=size.small)

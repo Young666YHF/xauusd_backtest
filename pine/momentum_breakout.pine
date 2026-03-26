@@ -1,0 +1,146 @@
+// XAUUSD Momentum Breakout Strategy - Pine Script v6
+// 策略B - 动量突破 (欧美盘 15:00-00:00 北京时间)
+// 核心逻辑: 布林带突破 + EMA趋势确认 + 追踪止损
+
+//@version=6
+strategy("XAUUSD Momentum Breakout Strategy", overlay=true,
+         initial_capital=100000,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=0.6,
+         slippage=1,
+         calc_on_every_tick=false)
+
+// ============================================
+// 参数设置
+// ============================================
+bb_period = input.int(20, "布林带周期", minval=5, maxval=50)
+bb_std = input.float(2.0, "布林带标准差", minval=1.0, maxval=4.0, step=0.01)
+
+ema_fast_len = input.int(20, "EMA快线周期", minval=5, maxval=50)
+ema_slow_len = input.int(50, "EMA慢线周期", minval=20, maxval=100)
+
+atr_period = input.int(14, "ATR周期", minval=5, maxval=30)
+stop_loss_atr_mult = input.float(1.2, "止损ATR倍数", minval=0.5, maxval=5.0, step=0.01)
+trailing_stop_atr_mult = input.float(2.5, "追踪止损ATR倍数", minval=1.0, maxval=8.0, step=0.01)
+
+european_start = input.int(15, "欧美盘开始(北京时间)", minval=0, maxval=23)
+european_end = input.int(2, "欧美盘结束(北京时间)", minval=0, maxval=6)
+
+// ============================================
+// 指标计算
+// ============================================
+bb_middle = ta.sma(close, bb_period)
+bb_std_dev = ta.stdev(close, bb_period)
+bb_upper = bb_middle + bb_std * bb_std_dev
+bb_lower = bb_middle - bb_std * bb_std_dev
+
+atr = ta.atr(atr_period)
+ema_fast_val = ta.ema(close, ema_fast_len)
+ema_slow_val = ta.ema(close, ema_slow_len)
+
+// ============================================
+// 时区判断
+// ============================================
+current_hour = hour(time, "Asia/Shanghai")
+is_european_session = (current_hour >= european_start) or (current_hour < european_end)
+
+// ============================================
+// 策略状态
+// ============================================
+var string strategy_state = ""
+var int bars_held = 0
+var float entry_price = 0.0
+var float fixed_stop_loss = 0.0
+var float highest_since_entry = 0.0
+var float lowest_since_entry = 1000000.0
+
+has_position = strategy_state != ""
+is_long = strategy_state == "LONG"
+is_short = strategy_state == "SHORT"
+
+// ============================================
+// 出场逻辑
+// ============================================
+if has_position
+    bars_held := bars_held + 1
+    highest_since_entry := math.max(highest_since_entry, high)
+    lowest_since_entry := math.min(lowest_since_entry, low)
+
+    if is_long
+        if low <= fixed_stop_loss
+            strategy.close("Long", comment="初始止损")
+            strategy_state := ""
+            bars_held := 0
+            highest_since_entry := 0.0
+        else
+            trailing_stop = highest_since_entry - trailing_stop_atr_mult * atr
+            if low <= trailing_stop and highest_since_entry > entry_price
+                strategy.close("Long", comment="追踪止损")
+                strategy_state := ""
+                bars_held := 0
+                highest_since_entry := 0.0
+    else if is_short
+        if high >= fixed_stop_loss
+            strategy.close("Short", comment="初始止损")
+            strategy_state := ""
+            bars_held := 0
+            lowest_since_entry := 1000000.0
+        else
+            trailing_stop = lowest_since_entry + trailing_stop_atr_mult * atr
+            if high >= trailing_stop and lowest_since_entry < entry_price
+                strategy.close("Short", comment="追踪止损")
+                strategy_state := ""
+                bars_held := 0
+                lowest_since_entry := 1000000.0
+
+// ============================================
+// 入场信号 (与Python逻辑一致)
+// Python: prev_close <= prev_bb_upper and close > bb_upper and ema_bullish
+// ============================================
+ema_bullish = ema_fast_val > ema_slow_val * 1.0005
+ema_bearish = ema_fast_val < ema_slow_val * 0.9995
+
+// 突破判断使用当前K线（与Python一致）
+prev_close = close[1]
+prev_bb_upper = bb_upper[1]
+prev_bb_lower = bb_lower[1]
+
+long_signal = is_european_session and not has_position and (prev_close <= prev_bb_upper) and (close > bb_upper) and ema_bullish
+short_signal = is_european_session and not has_position and (prev_close >= prev_bb_lower) and (close < bb_lower) and ema_bearish
+
+if long_signal
+    entry_price_val = close
+    sl_price = entry_price_val - stop_loss_atr_mult * atr
+    strategy.entry("Long", strategy.long)
+    strategy_state := "LONG"
+    entry_price := entry_price_val
+    fixed_stop_loss := sl_price
+    bars_held := 0
+    highest_since_entry := high
+    lowest_since_entry := low
+
+if short_signal
+    entry_price_val = close
+    sl_price = entry_price_val + stop_loss_atr_mult * atr
+    strategy.entry("Short", strategy.short)
+    strategy_state := "SHORT"
+    entry_price := entry_price_val
+    fixed_stop_loss := sl_price
+    bars_held := 0
+    highest_since_entry := high
+    lowest_since_entry := low
+
+// ============================================
+// 绘图
+// ============================================
+plot(bb_upper, "BB上轨", color=color.new(color.blue, 30), linewidth=1)
+plot(bb_lower, "BB下轨", color=color.new(color.blue, 30), linewidth=1)
+plot(ema_fast_val, "EMA快线", color=color.new(color.yellow, 0), linewidth=1)
+plot(ema_slow_val, "EMA慢线", color=color.new(color.red, 0), linewidth=1)
+
+plotshape(long_signal, "Long", shape.diamond, location.belowbar, color.lime, size=size.small)
+plotshape(short_signal, "Short", shape.diamond, location.abovebar, color.maroon, size=size.small)
+
+bgcolor(is_european_session ? color.new(color.blue, 95) : na, title="欧美盘时段")

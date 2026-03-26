@@ -5,11 +5,13 @@ import {
   StockOutlined,
   LineChartOutlined,
   ThunderboltOutlined,
+  DollarOutlined,
 } from '@ant-design/icons';
 import HomePage from './pages/HomePage';
 import StrategyPage from './pages/StrategyPage';
 import BacktestPage from './pages/BacktestPage';
 import OptimizePage from './pages/OptimizePage';
+import DollarTraderPage from './pages/DollarTraderPage';
 import './App.css';
 
 const { Sider, Content, Header } = Layout;
@@ -19,6 +21,7 @@ const menuItems = [
   { key: '/strategy', icon: <StockOutlined />, label: '策略说明' },
   { key: '/backtest', icon: <LineChartOutlined />, label: '回测分析' },
   { key: '/optimize', icon: <ThunderboltOutlined />, label: '参数优化' },
+  { key: '/dollar-trader', icon: <DollarOutlined />, label: '美元策略' },
 ];
 
 function AppContent() {
@@ -62,6 +65,7 @@ function AppContent() {
             <Route path="/strategy" element={<StrategyPage />} />
             <Route path="/backtest" element={<BacktestPage />} />
             <Route path="/optimize" element={<OptimizePage />} />
+            <Route path="/dollar-trader" element={<DollarTraderPage />} />
           </Routes>
         </Content>
       </Layout>

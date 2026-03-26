@@ -4,17 +4,36 @@
 yfinance>=0.2.0
 
 # 数据处理
-pandas>=1.5.0
-numpy>=1.21.0
+pandas>=2.0.0
+numpy>=1.24.0
 
 # 可视化
 matplotlib>=3.5.0
+plotly>=5.15.0
 
-# 可选: 进度条
-tqdm>=4.64.0
+# 优化
+optuna>=3.0.0
+
+# 配置管理
+pydantic>=2.0.0
+pyyaml>=6.0
+
+# 时区处理
+pytz>=2023.3
+
+# 性能优化
+numba>=0.57.0
 
 # Web 界面
 fastapi>=0.100.0
-uvicorn>=0.22.0
-pydantic>=2.0.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
 websockets>=11.0
+
+# 测试
+pytest>=7.4.0
+
+# 工具
+tqdm>=4.64.0
+python-dateutil>=2.8.0
+tabulate>=0.9.0

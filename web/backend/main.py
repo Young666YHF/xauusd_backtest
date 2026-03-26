@@ -1,5 +1,6 @@
 """
 FastAPI main application for XAUUSD Backtest Web Interface
+简化版本 - 通过命令行接口提供服务
 """
 
 from fastapi import FastAPI, Request
@@ -8,52 +9,47 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 from contextlib import asynccontextmanager
 import os
-
-# Import API routers (support both direct run and module import)
 import sys
-backend_dir = os.path.dirname(__file__)
-if backend_dir not in sys.path:
-    sys.path.insert(0, backend_dir)
 
-from api.backtest import router as backtest_router
-from api.optimize import router as optimize_router
+# 添加项目根目录到路径
+backend_dir = os.path.dirname(__file__)
+project_root = os.path.dirname(os.path.dirname(backend_dir))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from core.config import get_config
+from strategies import StrategyRegistry
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler"""
-    # Startup
-    print("Starting XAUUSD Backtest Server...")
+    print("Starting XAUUSD Backtest Server v2.0...")
     yield
-    # Shutdown
     print("Shutting down...")
 
 
 app = FastAPI(
     title="XAUUSD Backtest System",
     description="Web interface for XAUUSD dual-strategy backtesting and optimization",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan
 )
 
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict this
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include API routers FIRST (before static files)
-app.include_router(backtest_router)
-app.include_router(optimize_router)
-
 
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "xauusd-backtest"}
+    return {"status": "healthy", "service": "xauusd-backtest", "version": "2.0.0"}
 
 
 @app.get("/api/version")
@@ -71,8 +67,38 @@ async def version_info():
             "pullback_confirmation": True,
             "bayesian_optimization": True,
             "walk_forward_validation": True,
+            "dollar_trader_strategy": True,
         }
     }
+
+
+@app.get("/api/strategies")
+async def list_strategies():
+    """List available strategies"""
+    strategies = StrategyRegistry.list_strategies()
+    info = {}
+    for name in strategies:
+        info[name] = StrategyRegistry.get_info(name)
+    return {
+        "strategies": strategies,
+        "info": info
+    }
+
+
+@app.get("/api/config")
+async def get_default_config():
+    """Get default configuration"""
+    config = get_config()
+    return {
+        "strategy": config.strategy.to_dict(),
+        "trading": config.trading.model_dump(),
+        "optimization": config.optimization.model_dump()
+    }
+
+
+# Import and include dollar trader routes
+from api.dollar_trader import router as dollar_trader_router
+app.include_router(dollar_trader_router)
 
 
 # Mount static files for frontend (production build) - AFTER API routes
@@ -92,7 +118,6 @@ async def serve_spa(request: Request, full_path: str):
     if os.path.exists(index_file):
         with open(index_file, 'r', encoding='utf-8') as f:
             html_content = f.read()
-        # Return HTML with cache-busting headers
         return HTMLResponse(
             content=html_content,
             headers={
@@ -101,7 +126,10 @@ async def serve_spa(request: Request, full_path: str):
                 "Expires": "0"
             }
         )
-    return {"error": "Frontend not built. Run 'npm run build' in frontend directory."}
+    return {
+        "error": "Frontend not built",
+        "message": "Web API is available. Use /api/health and /api/version for status."
+    }
 
 
 if __name__ == "__main__":

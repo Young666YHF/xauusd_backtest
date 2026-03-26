@@ -1,0 +1,68 @@
+# XAUUSD 量化交易系统配置
+# =========================
+
+# 交易配置
+trading:
+  symbol: "XAUUSD"
+  contract_size: 100
+  tick_size: 0.01
+  spread_per_ounce: 0.2
+  commission_per_lot: 3.5
+  initial_capital: 100000.0
+  leverage: 100
+  margin_call_ratio: 0.5
+  asian_session_start: 6
+  asian_session_end: 14
+  european_session_start: 15
+  european_session_end: 24
+  base_slippage: 0.15
+  atr_slippage_ratio: 0.03
+
+# 策略配置
+strategy:
+  bb_period: 20
+  bb_std: 2.0
+  kc_period: 20
+  kc_atr_mult: 1.5
+  atr_period: 14
+  rsi_period: 14
+  rsi_oversold: 25
+  rsi_overbought: 75
+  stop_loss_atr_mult_a: 1.0
+  max_hold_bars_a: 5
+  ema_fast: 20
+  ema_slow: 50
+  stop_loss_atr_mult_b: 1.2
+  trailing_stop_atr_mult: 2.5
+  squeeze_threshold: 0.8
+  volatility_filter_period: 20
+  volatility_filter_mult: 1.5
+  atr_time_stop_base: 4.0
+  atr_time_stop_mult: 0.5
+  pullback_confirmation_bars: 2
+  ema_momentum_threshold: 0.0005
+  strategy_b_mode: 0
+
+# 数据配置
+data:
+  data_dir: "/home/ctyun/xauusd_data"
+  interval: "15min"
+  timezone: "Asia/Shanghai"
+  data_timezone: "UTC"
+  vwap_reset_hour_et: 17
+
+# 优化配置
+optimization:
+  n_trials: 300
+  timeout: null
+  n_jobs: -1
+  early_stopping: true
+  patience: 50
+  optimization_target: "calmar"
+  min_trades: 30
+  min_win_rate: 0.3
+  use_walk_forward: true
+  train_ratio: 0.8
+
+# 版本信息
+version: "2.0.0"

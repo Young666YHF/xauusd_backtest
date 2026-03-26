@@ -1,0 +1,139 @@
+// XAUUSD Mean Reversion Strategy - Pine Script v6
+// 策略A - 均值回归 (亚盘 06:00-14:00 北京时间)
+// 核心逻辑: RSI超卖+布林带下轨做多, RSI超买+布林带上轨做空
+
+//@version=6
+strategy("XAUUSD Mean Reversion Strategy", overlay=true,
+         initial_capital=100000,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract,
+         commission_value=0.6,
+         slippage=1,
+         calc_on_every_tick=false)
+
+// ============================================
+// 参数设置
+// ============================================
+bb_period = input.int(20, "布林带周期", minval=5, maxval=50)
+bb_std = input.float(2.0, "布林带标准差", minval=1.0, maxval=4.0, step=0.01)
+
+rsi_period = input.int(14, "RSI周期", minval=5, maxval=30)
+rsi_oversold = input.int(25, "RSI超卖阈值", minval=10, maxval=40)
+rsi_overbought = input.int(75, "RSI超买阈值", minval=60, maxval=90)
+
+atr_period = input.int(14, "ATR周期", minval=5, maxval=30)
+stop_loss_atr_mult = input.float(1.0, "止损ATR倍数", minval=0.5, maxval=5.0, step=0.01)
+max_hold_bars = input.int(5, "最大持仓K线数", minval=3, maxval=15)
+
+asian_start = input.int(6, "亚盘开始(北京时间)", minval=0, maxval=23)
+asian_end = input.int(14, "亚盘结束(北京时间)", minval=0, maxval=23)
+
+// ============================================
+// 指标计算
+// ============================================
+bb_middle = ta.sma(close, bb_period)
+bb_std_dev = ta.stdev(close, bb_period)
+bb_upper = bb_middle + bb_std * bb_std_dev
+bb_lower = bb_middle - bb_std * bb_std_dev
+
+atr = ta.atr(atr_period)
+rsi = ta.rsi(close, rsi_period)
+
+// VWAP使用上一根K线的值避免前视偏差
+vwap_val = ta.vwap(hlc3)
+vwap_prev = vwap_val[1]
+
+// ============================================
+// 时区判断
+// ============================================
+current_hour = hour(time, "Asia/Shanghai")
+is_asian_session = (current_hour >= asian_start) and (current_hour < asian_end)
+
+// ============================================
+// 策略状态
+// ============================================
+var string strategy_state = ""
+var int bars_held = 0
+var float fixed_stop_loss = 0.0
+
+has_position = strategy_state != ""
+is_long = strategy_state == "LONG"
+is_short = strategy_state == "SHORT"
+
+// ============================================
+// 出场逻辑
+// ============================================
+if has_position
+    bars_held := bars_held + 1
+
+    if is_long
+        if low <= fixed_stop_loss
+            strategy.close("Long", comment="止损")
+            strategy_state := ""
+            bars_held := 0
+        else if high >= vwap_prev
+            strategy.close("Long", comment="VWAP止盈")
+            strategy_state := ""
+            bars_held := 0
+        else if bars_held >= max_hold_bars
+            strategy.close("Long", comment="时间止损")
+            strategy_state := ""
+            bars_held := 0
+    else if is_short
+        if high >= fixed_stop_loss
+            strategy.close("Short", comment="止损")
+            strategy_state := ""
+            bars_held := 0
+        else if low <= vwap_prev
+            strategy.close("Short", comment="VWAP止盈")
+            strategy_state := ""
+            bars_held := 0
+        else if bars_held >= max_hold_bars
+            strategy.close("Short", comment="时间止损")
+            strategy_state := ""
+            bars_held := 0
+
+// ============================================
+// 入场信号 (与Python逻辑一致)
+// Python: 使用prev_close和prev_rsi判断，且当前rsi>prev_rsi（回升确认）
+// ============================================
+// 前一根K线数据
+close_prev = close[1]
+rsi_prev = rsi[1]
+bb_lower_prev = bb_lower[1]
+bb_upper_prev = bb_upper[1]
+
+// 做多条件: 前一根K线触及布林带下轨 + RSI超卖 + 当前RSI回升
+long_signal = is_asian_session and not has_position and (close_prev <= bb_lower_prev) and (rsi_prev <= rsi_oversold) and (rsi > rsi_prev)
+
+// 做空条件: 前一根K线触及布林带上轨 + RSI超买 + 当前RSI回落
+short_signal = is_asian_session and not has_position and (close_prev >= bb_upper_prev) and (rsi_prev >= rsi_overbought) and (rsi < rsi_prev)
+
+if long_signal
+    sl_price = close - stop_loss_atr_mult * atr
+    tp_price = vwap_prev > close ? vwap_prev : close + math.abs(close - sl_price) * 2.0
+    strategy.entry("Long", strategy.long)
+    strategy_state := "LONG"
+    fixed_stop_loss := sl_price
+    bars_held := 0
+
+if short_signal
+    sl_price = close + stop_loss_atr_mult * atr
+    tp_price = vwap_prev < close ? vwap_prev : close - math.abs(close - sl_price) * 2.0
+    strategy.entry("Short", strategy.short)
+    strategy_state := "SHORT"
+    fixed_stop_loss := sl_price
+    bars_held := 0
+
+// ============================================
+// 绘图
+// ============================================
+plot(bb_upper, "BB上轨", color=color.new(color.blue, 30), linewidth=1)
+plot(bb_lower, "BB下轨", color=color.new(color.blue, 30), linewidth=1)
+plot(vwap_val, "VWAP", color=color.new(color.purple, 0), linewidth=2)
+
+plotshape(long_signal, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(short_signal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+bgcolor(is_asian_session ? color.new(color.yellow, 95) : na, title="亚盘时段")
