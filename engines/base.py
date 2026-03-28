@@ -367,7 +367,23 @@ class BaseBacktestEngine(ABC):
         if len(self.equity_curve) > 1:
             returns = pd.Series(self.equity_curve).pct_change().dropna()
             if len(returns) > 0 and returns.std() > 0:
-                result.sharpe_ratio = (returns.mean() / returns.std()) * np.sqrt(252 * 24 * 4)  # 15分钟数据
+                # 年化因子：30分钟数据，每天48根K线，每年252个交易日
+                annual_factor = np.sqrt(252 * 48)
+                result.sharpe_ratio = (returns.mean() / returns.std()) * annual_factor
+
+                # 索提诺比率（只考虑下行波动）
+                downside_returns = returns[returns < 0]
+                if len(downside_returns) > 0 and downside_returns.std() > 0:
+                    result.sortino_ratio = (returns.mean() / downside_returns.std()) * annual_factor
+
+        # 卡玛比率（年化收益率 / 最大回撤）
+        if result.max_drawdown_pct != 0 and len(self.equity_curve) > 1:
+            # 计算年化收益率
+            total_return = result.total_return
+            years = len(self.equity_curve) / (252 * 48)  # 30分钟数据
+            if years > 0:
+                annual_return = (1 + total_return) ** (1 / years) - 1
+                result.calmar_ratio = annual_return / abs(result.max_drawdown_pct)
 
         result.trades = self.trades.copy()
 
