@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Dollar Trader Martingale 策略回测脚本
-=====================================
-基于SMA_20/50/200趋势跟踪 + 马丁格尔仓位管理
+Dollar Trader Martingale ADX Enhanced 策略回测脚本
+====================================================
+基于SMA_20/50/200趋势跟踪 + ADX过滤的马丁格尔仓位管理
+
+ADX增强逻辑:
+  - 首次亏损后检查ADX值
+  - 当ADX > threshold时，启用马丁加倍
+  - 一旦启用马丁，连续加倍直到盈利（不再检查ADX）
+  - 盈利后重置，下次亏损重新判断ADX
 
 用法:
-    python run_dollar_trader_martingale_backtest.py --mode is --multiplier 2.0
-    python run_dollar_trader_martingale_backtest.py --mode full --multiplier 1.5 --max-steps 3
+    python run_dollar_trader_martingale_adx_backtest.py --mode is --multiplier 2.0
+    python run_dollar_trader_martingale_adx_backtest.py --mode full --adx-threshold 25
 """
 
 import argparse
@@ -22,9 +28,9 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, List
 
-from strategies.dollar_trader_martingale import (
-    DollarTraderMartingaleStrategy,
-    calculate_dollar_trader_martingale_indicators
+from strategies.dollar_trader_martingale_adx import (
+    DollarTraderMartingaleADXStrategy,
+    calculate_dollar_trader_martingale_adx_indicators
 )
 from engines.dollar_trader_engine import DollarTraderBacktestEngine
 from core.config import TradingConfig
@@ -34,26 +40,26 @@ from core.data_loader import DataLoader
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
-        description='Dollar Trader Martingale 策略回测',
+        description='Dollar Trader Martingale ADX Enhanced 策略回测',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
   # IS样本内回测 (默认)
-  python run_dollar_trader_martingale_backtest.py --mode is
+  python run_dollar_trader_martingale_adx_backtest.py --mode is
 
   # OOS样本外回测
-  python run_dollar_trader_martingale_backtest.py --mode oos
+  python run_dollar_trader_martingale_adx_backtest.py --mode oos
 
   # 完整数据回测
-  python run_dollar_trader_martingale_backtest.py --mode full
+  python run_dollar_trader_martingale_adx_backtest.py --mode full
+
+  # 自定义ADX阈值
+  python run_dollar_trader_martingale_adx_backtest.py --adx-threshold 25
 
   # 自定义时间范围和周期
-  python run_dollar_trader_martingale_backtest.py --mode custom \
-    --start-date 2024-01-01 --end-date 2026-02-28 --timeframe 30min
-
-  # 自定义马丁格尔参数
-  python run_dollar_trader_martingale_backtest.py --multiplier 2.5 --max-steps 4
-    """
+  python run_dollar_trader_martingale_adx_backtest.py --mode custom \
+    --start-date 2024-01-01 --end-date 2026-02-28 --timeframe 30m
+        """
     )
 
     parser.add_argument('--mode', type=str, default='is',
@@ -90,6 +96,12 @@ def parse_args():
     parser.add_argument('--sma-long', type=int, default=200,
                         help='长期SMA周期 (默认: 200)')
 
+    parser.add_argument('--adx-period', type=int, default=14,
+                        help='ADX周期 (默认: 14)')
+
+    parser.add_argument('--adx-threshold', type=float, default=20.0,
+                        help='ADX阈值，大于此值才启用马丁 (默认: 20.0)')
+
     parser.add_argument('--spread', type=float, default=20.0,
                         help='点差 (points, 默认: 20)')
 
@@ -102,7 +114,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_data(mode: str, data_path: str, timeframe: str = '30min',
+def load_data(mode: str, data_path: str, timeframe: str = '30m',
               start_date: str = None, end_date: str = None,
               verbose: bool = False) -> pd.DataFrame:
     """加载K线数据"""
@@ -165,9 +177,9 @@ def load_data(mode: str, data_path: str, timeframe: str = '30min',
 def run_backtest(args) -> Dict[str, Any]:
     """运行回测"""
 
-    print("=" * 60)
-    print("Dollar Trader Martingale 策略回测")
-    print("=" * 60)
+    print("=" * 70)
+    print("Dollar Trader Martingale ADX Enhanced 策略回测")
+    print("=" * 70)
 
     # 加载数据
     print(f"\n[1/4] 加载数据 (模式: {args.mode.upper()}, 周期: {args.timeframe})...")
@@ -182,6 +194,8 @@ def run_backtest(args) -> Dict[str, Any]:
         'position_size': args.position_size,
         'martingale_multiplier': args.multiplier,
         'max_martingale_steps': args.max_steps,
+        'adx_period': args.adx_period,
+        'adx_threshold': args.adx_threshold,
     }
 
     print(f"\n[2/4] 策略参数:")
@@ -190,14 +204,17 @@ def run_backtest(args) -> Dict[str, Any]:
     print(f"  基础仓位: {args.position_size}")
     print(f"  马丁格尔倍数: {args.multiplier}")
     print(f"  最大翻倍次数: {args.max_steps}")
+    print(f"  ADX周期: {args.adx_period}")
+    print(f"  ADX阈值: {args.adx_threshold}")
 
     # 计算指标
-    print(f"\n[3/4] 计算技术指标...")
-    df = calculate_dollar_trader_martingale_indicators(
+    print(f"\n[3/4] 计算技术指标 (SMA + ADX)...")
+    df = calculate_dollar_trader_martingale_adx_indicators(
         df,
         sma_short=args.sma_short,
         sma_medium=args.sma_medium,
-        sma_long=args.sma_long
+        sma_long=args.sma_long,
+        adx_period=args.adx_period
     )
 
     # 创建配置
@@ -209,15 +226,15 @@ def run_backtest(args) -> Dict[str, Any]:
     )
 
     # 创建策略
-    strategy = DollarTraderMartingaleStrategy(
+    strategy = DollarTraderMartingaleADXStrategy(
         params=strategy_params,
-        strategy_id=f"DT_Martingale_{args.multiplier}x"
+        strategy_id=f"DT_Martingale_ADX_{args.adx_threshold}"
     )
 
     # 生成信号
     print(f"\n[4/4] 生成交易信号...")
     signals = []
-    warmup_bars = strategy.params['sma_long'] + 5
+    warmup_bars = max(args.sma_long, args.adx_period * 2) + 5
     for i in range(warmup_bars, len(df)):
         signal = strategy.generate_signal(df, i)
         if signal:
@@ -230,15 +247,15 @@ def run_backtest(args) -> Dict[str, Any]:
     engine = DollarTraderBacktestEngine(config)
     result = engine.run(df, signals)
 
-    return result, engine
+    return result, engine, strategy
 
 
-def print_results(result, engine):
+def print_results(result, engine, strategy):
     """打印回测结果"""
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("回测结果")
-    print("=" * 60)
+    print("=" * 70)
 
     print(f"\n【交易统计】")
     print(f"  总交易次数: {result.total_trades}")
@@ -260,22 +277,15 @@ def print_results(result, engine):
     print(f"  夏普比率: {result.sharpe_ratio:.2f}")
     print(f"  索提诺比率: {result.sortino_ratio:.2f}")
 
-    # 马丁格尔统计（从交易记录中分析）
+    # ADX马丁统计
     if result.trades:
-        print(f"\n【马丁格尔统计】")
-        # 注意：当前引擎不支持马丁格尔层级追踪
-        # 这里显示基本统计
-        trades_df = pd.DataFrame([
-            {
-                'entry_time': t.entry_time,
-                'exit_time': t.exit_time,
-                'direction': t.direction.name,
-                'pnl': t.pnl,
-                'bars_held': t.bars_held,
-                'exit_reason': t.exit_reason.name,
-            }
-            for t in result.trades
-        ])
+        print(f"\n【ADX马丁格尔统计】")
+
+        # 获取策略状态信息
+        status = strategy.get_status_info()
+        print(f"  最终连续亏损次数: {status['consecutive_losses']}")
+        print(f"  马丁启用状态: {'是' if status['martingale_enabled'] else '否'}")
+        print(f"  最后ADX值: {status['last_adx_value']:.2f}" if status['last_adx_value'] else "  最后ADX值: N/A")
 
         # 连续亏损分析
         consecutive_losses = 0
@@ -288,7 +298,6 @@ def print_results(result, engine):
                 consecutive_losses = 0
 
         print(f"  最大连续亏损次数: {max_consecutive}")
-        print(f"  平均每笔持仓K线: {trades_df['bars_held'].mean():.1f}")
 
     # 权益曲线
     if result.equity_curve:
@@ -296,7 +305,7 @@ def print_results(result, engine):
         print(f"  初始权益: ${result.equity_curve[0]:,.2f}")
         print(f"  最终权益: ${result.equity_curve[-1]:,.2f}")
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
 
 
 def main():
@@ -305,14 +314,14 @@ def main():
 
     try:
         # 运行回测
-        results, engine = run_backtest(args)
+        results, engine, strategy = run_backtest(args)
 
         # 打印结果
-        print_results(results, engine)
+        print_results(results, engine, strategy)
 
         # 保存结果
         if args.output:
-            if result.trades:
+            if results.trades:
                 trades_df = pd.DataFrame([
                     {
                         'entry_time': t.entry_time,
@@ -324,7 +333,7 @@ def main():
                         'bars_held': t.bars_held,
                         'exit_reason': t.exit_reason.name,
                     }
-                    for t in result.trades
+                    for t in results.trades
                 ])
                 trades_df.to_csv(args.output, index=False)
                 print(f"\n交易记录已保存: {args.output}")

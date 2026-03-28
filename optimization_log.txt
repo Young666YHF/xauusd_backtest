@@ -1,30 +1,0 @@
-[I 2026-03-24 00:20:16,810] A new study created in memory with name: trend_angle_optimization
-
-======================================================================
-Trend Angle Breakout Strategy - Tick-Level Bayesian Optimization
-======================================================================
-
-[1/4] Loading In-Sample Data (2025-01-01 ~ 2025-10-31)...
-Loading data from 2025-01-01 to 2025-10-31...
-Loaded 19707 15min bars for indicators
-Loading tick data for execution...
-  Loaded 5,798,226 ticks from 2025-01
-  Loaded 5,815,784 ticks from 2025-02
-  Loaded 5,396,499 ticks from 2025-03
-  Loaded 6,160,835 ticks from 2025-04
-  Loaded 5,325,473 ticks from 2025-05
-  Loaded 4,752,206 ticks from 2025-06
-  Loaded 4,192,283 ticks from 2025-07
-  Loaded 4,332,294 ticks from 2025-08
-  Loaded 5,800,420 ticks from 2025-09
-  Loaded 9,296,228 ticks from 2025-10
-Total ticks loaded: 56,527,439
-
-[2/4] Running Bayesian Optimization...
-
-======================================================================
-Bayesian Optimization - 200 trials
-Target: calmar
-======================================================================
-
-  0%|          | 0/200 [00:00<?, ?it/s]                                         0%|          | 0/200 [04:04<?, ?it/s]Best trial: 0. Best value: -0.868214:   0%|          | 0/200 [04:04<?, ?it/s]Best trial: 0. Best value: -0.868214:   0%|          | 1/200 [04:04<13:31:17, 244.61s/it]                                                                                         Best trial: 0. Best value: -0.868214:   0%|          | 1/200 [08:13<13:31:17, 244.61s/it]Best trial: 1. Best value: -0.148125:   0%|          | 1/200 [08:13<13:31:17, 244.61s/it]Best trial: 1. Best value: -0.148125:   1%|          | 2/200 [08:13<13:36:02, 247.28s/it]                                                                                         Best trial: 1. Best value: -0.148125:   1%|          | 2/200 [12:15<13:36:02, 247.28s/it]Best trial: 1. Best value: -0.148125:   1%|          | 2/200 [12:15<13:36:02, 247.28s/it]Best trial: 1. Best value: -0.148125:   2%|▏         | 3/200 [12:15<13:23:54, 244.85s/it]                                                                                         Best trial: 1. Best value: -0.148125:   2%|▏         | 3/200 [16:19<13:23:54, 244.85s/it]Best trial: 1. Best value: -0.148125:   2%|▏         | 3/200 [16:19<13:23:54, 244.85s/it]Best trial: 1. Best value: -0.148125:   2%|▏         | 4/200 [16:19<13:18:35, 244.47s/it]

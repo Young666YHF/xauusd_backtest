@@ -19,12 +19,12 @@ class TradingConfig(BaseModel):
     tick_size: float = Field(default=0.01, description="最小价格变动")
 
     # 成本配置
-    spread_per_ounce: float = Field(default=0.2, description="每盎司点差（美元）")
-    commission_per_lot: float = Field(default=3.5, description="每手单边佣金")
+    spread_per_ounce: float = Field(default=0.6, description="每盎司点差（美元）- 使得每0.01手往返成本=0.6美元")
+    commission_per_lot: float = Field(default=0.0, description="每手单边佣金（已包含在点差中）")
 
     # 资金配置
     initial_capital: float = Field(default=100000.0, description="初始资金")
-    leverage: int = Field(default=100, description="杠杆倍数")
+    leverage: int = Field(default=1000, description="杠杆倍数（1000倍杠杆）")
     margin_call_ratio: float = Field(default=0.5, description="爆仓保证金比例")
 
     # 交易时段配置（北京时间 UTC+8）

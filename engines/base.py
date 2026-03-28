@@ -28,8 +28,13 @@ class StrategyCategory(Enum):
 
 @dataclass
 class ExecutionModel:
-    """执行模型 - 定义滑点、佣金等执行参数"""
-    spread_per_ounce: float = 0.2
+    """执行模型 - 定义滑点、佣金等执行参数
+
+    注意：根据全局配置，点差成本已包含佣金，所以commission_per_lot=0
+    每手往返成本 = spread_per_ounce × contract_size = 0.6 × 100 = 60美元/手
+    每0.01手往返成本 = 60 × 0.01 = 0.6美元
+    """
+    spread_per_ounce: float = 0.6  # 与TradingConfig一致
     contract_size: int = 100
 
     # 滑点模型
@@ -42,8 +47,8 @@ class ExecutionModel:
     stop_loss_slippage_mult: float = 2.0
     take_profit_slippage_mult: float = 0.0
 
-    # 佣金
-    commission_per_lot: float = 3.5
+    # 佣金（已包含在点差中，所以设为0）
+    commission_per_lot: float = 0.0
 
     def calculate_entry_slippage(
         self,
@@ -203,7 +208,8 @@ class BaseBacktestEngine(ABC):
 
         self.position = position
 
-        # 扣除佣金
+        # 入场时扣除佣金（如果有的话）
+        # 注意：点差成本在出场时一次性扣除，这里只扣除额外佣金
         commission = self.execution.calculate_commission(position_size)
         self.capital -= commission
 
@@ -243,7 +249,13 @@ class BaseBacktestEngine(ABC):
         pnl = pnl_points * self.config.contract_size * pos.size
         pnl_pct = pnl_points / pos.entry_price if pos.entry_price != 0 else 0
 
-        # 扣除佣金
+        # 【修复】扣除点差成本（已包含佣金）
+        # 每手往返成本 = spread_per_ounce × contract_size
+        # 每0.01手成本 = 0.6 × 100 × 0.01 = 0.6美元
+        spread_cost = self.config.spread_per_ounce * self.config.contract_size * pos.size
+        pnl -= spread_cost
+
+        # 扣除额外佣金（如果有）
         commission = self.execution.calculate_commission(pos.size)
         pnl -= commission
         self.capital += pnl
@@ -263,7 +275,7 @@ class BaseBacktestEngine(ABC):
             bars_held=self._current_bar_idx - pos.entry_bar_index,
             entry_slippage=0.0,
             exit_slippage=slippage,
-            commission=commission
+            commission=spread_cost + commission  # 记录总成本
         )
 
         self.trades.append(trade)
@@ -346,21 +358,22 @@ class BaseBacktestEngine(ABC):
         result.equity_curve = self.equity_curve.copy()
         result.equity_timestamps = self.equity_timestamps.copy()
 
-        # 计算回撤
+        # 计算回撤（正确处理负权益情况）
         if self.equity_curve:
             peak = self.equity_curve[0]
-            peak_value = peak
             max_dd = 0
             max_dd_value = 0
             for equity in self.equity_curve:
                 if equity > peak:
                     peak = equity
-                    peak_value = equity
-                dd = (peak - equity) / peak if peak > 0 else 0
-                dd_value = peak_value - equity
-                max_dd = min(max_dd, -dd)
-                max_dd_value = max(max_dd_value, dd_value)
-            result.max_drawdown_pct = max_dd
+                # 回撤金额
+                dd_value = peak - equity
+                # 回撤率：基于初始资金计算（更直观）
+                dd_pct = dd_value / self.initial_capital if self.initial_capital > 0 else 0
+                if dd_value > max_dd_value:
+                    max_dd_value = dd_value
+                    max_dd = dd_pct
+            result.max_drawdown_pct = -max_dd  # 返回负值表示回撤
             result.max_drawdown = max_dd_value
 
         # 夏普比率

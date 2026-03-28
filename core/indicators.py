@@ -181,6 +181,12 @@ def calculate_bollinger_bands(
     return upper, middle, lower
 
 
+def calculate_bbw(series: pd.Series, period: int = 20, std_dev: float = 2.0) -> pd.Series:
+    """计算Bollinger Band Width (BBW) = (Upper - Lower) / Middle × 100"""
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(series, period, std_dev)
+    return (bb_upper - bb_lower) / bb_middle * 100
+
+
 def calculate_keltner_channels(
     df: pd.DataFrame,
     period: int = 20,

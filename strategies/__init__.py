@@ -10,6 +10,7 @@ from .momentum_breakout import MomentumBreakoutStrategy
 from .trend_angle_breakout import TrendAngleBreakoutStrategy
 from .dollar_trader import DollarTraderStrategy
 from .dollar_trader_martingale import DollarTraderMartingaleStrategy
+from .dollar_trader_martingale_adx import DollarTraderMartingaleBBWStepStrategy
 
 __all__ = [
     'BaseStrategy',
@@ -19,6 +20,7 @@ __all__ = [
     'TrendAngleBreakoutStrategy',
     'DollarTraderStrategy',
     'DollarTraderMartingaleStrategy',
+    'DollarTraderMartingaleBBWStepStrategy',
 ]
 
 # 注册内置策略
@@ -27,3 +29,4 @@ StrategyRegistry.register('momentum_breakout', MomentumBreakoutStrategy)
 StrategyRegistry.register('trend_angle_breakout', TrendAngleBreakoutStrategy)
 StrategyRegistry.register('dollar_trader', DollarTraderStrategy)
 StrategyRegistry.register('dollar_trader_martingale', DollarTraderMartingaleStrategy)
+StrategyRegistry.register('dollar_trader_martingale_adx', DollarTraderMartingaleBBWStepStrategy)

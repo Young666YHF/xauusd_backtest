@@ -1,0 +1,51 @@
+{
+  "target": "sharpe",
+  "best_params": {
+    "bb_period": 27,
+    "bbw_ma_period": 99
+  },
+  "full_params": {
+    "sma_short": 20,
+    "sma_medium": 50,
+    "sma_long": 200,
+    "position_size": 1.0,
+    "martingale_multiplier": 2.0,
+    "max_martingale_steps": 5,
+    "bb_std": 2.0,
+    "enable_overshoot": true,
+    "enable_undershoot": true,
+    "bb_period": 27,
+    "bbw_ma_period": 99
+  },
+  "best_fitness": 0.6506028794685411,
+  "train_result": {
+    "total_trades": 979,
+    "win_rate": 0.39325842696629215,
+    "total_pnl": 89439.80000001768,
+    "total_return": 0.8943980000001769,
+    "max_drawdown": 28417.399999998655,
+    "max_drawdown_pct": -0.21730139046360178,
+    "sharpe_ratio": 0.6506028794685411,
+    "calmar_ratio": 0.0,
+    "profit_factor": 1.1651179135429623
+  },
+  "config": {
+    "train_start": "2017-01-01",
+    "train_end": "2022-12-31",
+    "test_start": "2023-01-01",
+    "test_end": "2026-02-28",
+    "timeframe": "30m",
+    "n_trials": 300
+  },
+  "test_result": {
+    "total_trades": 557,
+    "win_rate": 0.3895870736086176,
+    "total_pnl": 149431.70000000467,
+    "total_return": 1.4943170000000467,
+    "max_drawdown": 46420.199999996286,
+    "max_drawdown_pct": -0.4060190623466253,
+    "sharpe_ratio": 0.8548934292151837,
+    "calmar_ratio": 0.0,
+    "profit_factor": 1.2299340472394305
+  }
+}

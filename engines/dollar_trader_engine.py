@@ -39,6 +39,11 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None
     ):
+        # 【重要】强制使用零佣金模型（点差已包含佣金）
+        # 避免入场时重复扣除佣金
+        if execution_model is None:
+            execution_model = ExecutionModel(commission_per_lot=0.0)
+
         super().__init__(config, execution_model)
 
         # 统计信息
@@ -56,52 +61,80 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
     def run(
         self,
         df: pd.DataFrame,
-        signals: List[TradeSignal],
-        tick_df: Optional[pd.DataFrame] = None
+        signals: List[TradeSignal] = None,
+        tick_df: Optional[pd.DataFrame] = None,
+        strategy=None  # 添加策略参数，用于回调和实时信号生成
     ) -> BacktestResult:
         """
         执行回测
 
         Args:
             df: OHLCV数据
-            signals: 交易信号列表
+            signals: 交易信号列表(可选，如果提供strategy则优先使用实时生成)
             tick_df: Tick数据(可选，用于更精确的入场价格)
+            strategy: 策略实例(可选，用于交易完成回调和实时信号生成)
 
         Returns:
             BacktestResult
         """
         self.reset()
         self._df = df
+        self._strategy = strategy  # 保存策略引用
 
         # 准备Tick映射(如果有)
         bar_idx_to_ticks = None
         if tick_df is not None:
             bar_idx_to_ticks = self._prepare_tick_mapping(tick_df, df.index)
 
-        # 按执行索引排序信号
-        signal_dict = defaultdict(list)
-        for sig in signals:
-            signal_dict[sig.execution_bar_index].append(sig)
+        # 如果提供了策略，使用实时信号生成模式
+        if strategy is not None and hasattr(strategy, 'generate_signal'):
+            # 实时信号生成模式
+            warmup_bars = max(
+                strategy.params.get('sma_long', 200),
+                strategy.params.get('bb_period', 20) + strategy.params.get('bbw_ma_period', 50)
+            ) + 5
 
-        # 遍历K线
-        for i in range(len(df)):
-            self._current_bar_idx = i
-            bar = df.iloc[i]
-            timestamp = df.index[i]
+            for i in range(len(df)):
+                self._current_bar_idx = i
+                bar = df.iloc[i]
+                timestamp = df.index[i]
 
-            # 处理持仓检查
-            if self.position:
-                self._check_position_exit(bar, timestamp)
+                # 处理持仓检查
+                if self.position:
+                    self._check_position_exit(bar, timestamp)
 
-            # 处理信号
-            if i in signal_dict:
-                for signal in signal_dict[i]:
-                    self._process_signal(signal, bar, timestamp, bar_idx_to_ticks)
+                # 【关键】实时生成信号（策略状态会根据实际交易结果更新）
+                if i >= warmup_bars:
+                    signal = strategy.generate_signal(df, i)
+                    if signal:
+                        self._process_signal(signal, bar, timestamp, bar_idx_to_ticks)
 
-            # 记录权益
-            equity = self.get_current_equity()
-            self.equity_curve.append(equity)
-            self.equity_timestamps.append(timestamp)
+                # 记录权益
+                equity = self.get_current_equity()
+                self.equity_curve.append(equity)
+                self.equity_timestamps.append(timestamp)
+        else:
+            # 传统模式：使用预生成的信号列表
+            signal_dict = defaultdict(list)
+            if signals:
+                for sig in signals:
+                    signal_dict[sig.execution_bar_index].append(sig)
+
+            for i in range(len(df)):
+                self._current_bar_idx = i
+                bar = df.iloc[i]
+                timestamp = df.index[i]
+
+                if self.position:
+                    self._check_position_exit(bar, timestamp)
+
+                if i in signal_dict:
+                    for signal in signal_dict[i]:
+                        self._process_signal(signal, bar, timestamp, bar_idx_to_ticks)
+
+                equity = self.get_current_equity()
+                self.equity_curve.append(equity)
+                self.equity_timestamps.append(timestamp)
 
         # 强制平仓
         if self.position:
@@ -176,6 +209,10 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         spread_cost = self.config.spread_per_ounce * self.config.contract_size / 2
         slippage = spread_cost / self.config.contract_size  # 转换为价格单位
 
+        # 【关键】从策略获取当前仓位大小（支持马丁格尔动态调整）
+        if hasattr(self, '_strategy') and self._strategy is not None and hasattr(self._strategy, 'get_position_size'):
+            signal.size = self._strategy.get_position_size()
+
         if self.position:
             # 检查是否是反向信号
             if signal.direction != self.position.direction:
@@ -183,6 +220,10 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
                 exit_slippage = self._calculate_exit_slippage(bar['Close'])
                 self._close_position(bar['Close'], ExitReason.SIGNAL_REVERSE, exit_slippage)
                 self.signal_exits += 1
+
+                # 【关键】平仓后，策略的马丁格尔状态可能已更新，重新获取仓位大小
+                if hasattr(self, '_strategy') and self._strategy is not None and hasattr(self._strategy, 'get_position_size'):
+                    signal.size = self._strategy.get_position_size()
 
                 # 然后开新仓(如果信号方向明确)
                 if signal.direction in [TradeDirection.LONG, TradeDirection.SHORT]:
@@ -226,8 +267,10 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
             exit_price_adjusted = exit_price + slippage
             pnl_points = pos.entry_price - exit_price_adjusted
 
-        # 扣除点差成本(双向)
-        total_spread_cost = self.config.spread_per_ounce * self.config.contract_size
+        # 【Bug修复】点差成本按仓位比例计算
+        # 每0.01手往返成本=0.6美元，即每手成本=60美元
+        # 成本 = 每手成本 × 仓位大小
+        total_spread_cost = self.config.spread_per_ounce * self.config.contract_size * pos.size
 
         # 计算盈亏
         pnl = pnl_points * self.config.contract_size * pos.size - total_spread_cost
@@ -274,6 +317,17 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
             trade=trade,
             position=pos
         )
+
+        # 【关键】调用策略的on_trade_completed回调，更新马丁格尔状态
+        if hasattr(self, '_strategy') and self._strategy is not None:
+            self._strategy.on_trade_completed({
+                'profit': pnl,
+                'direction': pos.direction,
+                'entry_price': pos.entry_price,
+                'exit_price': exit_price_adjusted,
+                'size': pos.size,
+                'exit_reason': exit_reason,
+            })
 
         self.position = None
         return trade
