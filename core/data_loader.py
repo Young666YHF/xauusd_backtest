@@ -160,14 +160,38 @@ class DataLoader:
         Returns:
             OHLCV DataFrame
         """
-        filename = f"XAUUSD_{year}-{month:02d}.csv"
-        filepath = self.data_dir / filename
+        # 支持两种文件格式：
+        # 1. kline目录格式: XAUUSD_BID_{interval}_{YYYYMM}.csv
+        # 2. tick目录格式: XAUUSD_{year}-{month}.csv
 
-        if not filepath.exists():
-            raise FileNotFoundError(f"数据文件不存在: {filepath}")
+        # 先尝试kline格式
+        interval_short = interval.replace('min', 'm') if 'min' in interval else interval
+        kline_filename = f"XAUUSD_BID_{interval_short}_{year}{month:02d}.csv"
+        kline_filepath = self.data_dir / "kline" / interval_short / kline_filename
 
-        tick_df = self.load_tick_data(filepath)
-        return self.resample_to_ohlcv(tick_df, interval)
+        if kline_filepath.exists():
+            df = pd.read_csv(kline_filepath)
+            if 'timestamp' in df.columns:
+                # 毫秒级时间戳转换
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+                df.set_index('timestamp', inplace=True)
+            elif df.columns[0] == 'timestamp' or df.columns[0].lower() == 'timestamp':
+                df = pd.read_csv(kline_filepath, index_col=0, parse_dates=True)
+            # 标准化列名
+            df.columns = [c.capitalize() for c in df.columns]
+            if df.index.tz is None:
+                df.index = df.index.tz_localize('UTC')
+            return df
+
+        # 再尝试tick格式
+        tick_filename = f"XAUUSD_{year}-{month:02d}.csv"
+        tick_filepath = self.data_dir / tick_filename
+
+        if tick_filepath.exists():
+            tick_df = self.load_tick_data(tick_filepath)
+            return self.resample_to_ohlcv(tick_df, interval)
+
+        raise FileNotFoundError(f"数据文件不存在: {kline_filepath} 或 {tick_filepath}")
 
     def load_range(
         self,
