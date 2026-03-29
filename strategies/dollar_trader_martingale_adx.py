@@ -307,73 +307,92 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
         # 检查BBW是否允许开仓（入场时才检查）
         allow_entry, bbw_value, bbw_ma = self._check_bbw_for_entry(df, current_idx)
 
-        # 【Bug修复】严格按照Pine逻辑顺序：
-        # 1. 先处理出场信号（含反向开仓判断）
-        # 2. 再处理新开仓信号
-        # Pine中反向开仓条件: hasPosition + isBearish/Bullish + smaCross + bbwAllowEntry
+        # 【修复】严格按照Pine逻辑：
+        # Pine的出场和反向开仓是独立判断的，但在同一根K线上执行
+        # - 如果满足出场条件 + 反向开仓条件 -> 返回反向开仓信号（引擎会先平仓再开仓）
+        # - 如果只满足出场条件 -> 返回平仓信号
+        # - 如果只满足入场条件 -> 返回入场信号
 
         signal = None
 
         # ====================================
-        # 第一步: 出场信号检查 (含反向开仓)
+        # 持有多头时的处理
         # ====================================
-        if self.current_position == TradeDirection.LONG and sma_bearish_cross:
-            # 多头平仓: SMA_20下穿SMA_50
-            # Pine: 先平仓，再检查是否反向开仓
-            # 反向开仓条件: 空头排列 + BBW允许 (交叉条件已满足)
-            if prev_bearish and allow_entry:
-                # 满足反向开仓条件，创建做空信号（引擎会先平多再开空）
-                signal = self._create_exit_signal(
-                    current_timestamp, TradeDirection.SHORT, current_open,
-                    prev_sma_s, prev_sma_m, current_idx, is_long_exit=True
-                )
-                self.current_position = TradeDirection.SHORT
-            else:
-                # 仅平仓，不反向开仓
-                signal = TradeSignal(
-                    timestamp=current_timestamp,
-                    signal_type=SignalType.CLOSE_LONG,
-                    strategy_id=self.strategy_id,
-                    direction=TradeDirection.FLAT,
-                    entry_price=current_open,
-                    reason=f"Long Exit (no reverse): BBW not allowed or not bearish",
-                    signal_bar_index=current_idx - 1,
-                    execution_bar_index=current_idx,
-                )
-                self.current_position = None
-
-        elif self.current_position == TradeDirection.SHORT and sma_bullish_cross:
-            # 空头平仓: SMA_20上穿SMA_50
-            # 反向开仓条件: 多头排列 + BBW允许 (交叉条件已满足)
-            if prev_bullish and allow_entry:
-                # 满足反向开仓条件，创建做多信号（引擎会先平空再开多）
-                signal = self._create_exit_signal(
-                    current_timestamp, TradeDirection.LONG, current_open,
-                    prev_sma_s, prev_sma_m, current_idx, is_long_exit=False
-                )
-                self.current_position = TradeDirection.LONG
-            else:
-                # 仅平仓，不反向开仓
-                signal = TradeSignal(
-                    timestamp=current_timestamp,
-                    signal_type=SignalType.CLOSE_SHORT,
-                    strategy_id=self.strategy_id,
-                    direction=TradeDirection.FLAT,
-                    entry_price=current_open,
-                    reason=f"Short Exit (no reverse): BBW not allowed or not bullish",
-                    signal_bar_index=current_idx - 1,
-                    execution_bar_index=current_idx,
-                )
-                self.current_position = None
+        if self.current_position == TradeDirection.LONG:
+            if sma_bearish_cross:
+                # 满足出场条件
+                if prev_bearish and allow_entry:
+                    # 【关键】Pine: 同时满足反向开空条件 -> 返回做空信号
+                    # 引擎会先平多再开空
+                    signal = self._create_signal(
+                        timestamp=current_timestamp,
+                        direction=TradeDirection.SHORT,
+                        entry_price=current_open,
+                        stop_loss=None,
+                        take_profit=None,
+                        reason=f"Reverse to Short: SMA cross + BBW({bbw_value:.2f})>MA({bbw_ma:.2f})",
+                        signal_bar_idx=current_idx - 1,
+                        execution_bar_idx=current_idx,
+                        size=self._calculate_position_size(),
+                    )
+                    self.current_position = TradeDirection.SHORT
+                else:
+                    # 只平仓，不反向开仓
+                    signal = TradeSignal(
+                        timestamp=current_timestamp,
+                        signal_type=SignalType.CLOSE_LONG,
+                        strategy_id=self.strategy_id,
+                        direction=TradeDirection.FLAT,
+                        entry_price=current_open,
+                        reason=f"Long Exit: SMA_20 crossed below SMA_50 (no reverse)",
+                        signal_bar_index=current_idx - 1,
+                        execution_bar_index=current_idx,
+                    )
+                    self.current_position = None
 
         # ====================================
-        # 第二步: 新开仓信号 (仅当无持仓时)
+        # 持有空头时的处理
+        # ====================================
+        elif self.current_position == TradeDirection.SHORT:
+            if sma_bullish_cross:
+                # 满足出场条件
+                if prev_bullish and allow_entry:
+                    # 【关键】Pine: 同时满足反向开多条件 -> 返回做多信号
+                    signal = self._create_signal(
+                        timestamp=current_timestamp,
+                        direction=TradeDirection.LONG,
+                        entry_price=current_open,
+                        stop_loss=None,
+                        take_profit=None,
+                        reason=f"Reverse to Long: SMA cross + BBW({bbw_value:.2f})>MA({bbw_ma:.2f})",
+                        signal_bar_idx=current_idx - 1,
+                        execution_bar_idx=current_idx,
+                        size=self._calculate_position_size(),
+                    )
+                    self.current_position = TradeDirection.LONG
+                else:
+                    # 只平仓，不反向开仓
+                    signal = TradeSignal(
+                        timestamp=current_timestamp,
+                        signal_type=SignalType.CLOSE_SHORT,
+                        strategy_id=self.strategy_id,
+                        direction=TradeDirection.FLAT,
+                        entry_price=current_open,
+                        reason=f"Short Exit: SMA_20 crossed above SMA_50 (no reverse)",
+                        signal_bar_index=current_idx - 1,
+                        execution_bar_index=current_idx,
+                    )
+                    self.current_position = None
+
+        # ====================================
+        # 无持仓时的入场检查
+        # Pine: if not hasPosition and isBullish/Bearish and bbwAllowEntry
         # ====================================
         if signal is None and self.current_position is None:
-            signal = self._generate_entry_signal(
+            signal = self._generate_entry_signal_v2(
                 prev_bullish, prev_bearish, current_timestamp, current_open,
                 prev_close, prev_sma_s, prev_sma_m, prev_sma_l, current_idx,
-                allow_entry, bbw_value, bbw_ma
+                allow_entry, bbw_value, bbw_ma, sma_bearish_cross, sma_bullish_cross
             )
 
         return signal
@@ -394,45 +413,116 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
         bbw_ma: float
     ) -> Optional[TradeSignal]:
         """
-        生成新开仓入场信号
-
-        【重要】此方法仅处理新开仓，反向开仓已在主方法中处理
-        新开仓条件: 无持仓 + 趋势排列 + BBW允许
+        生成新开仓入场信号（旧方法，保留向后兼容）
         """
-        # 只处理新开仓（无持仓）
-        if self.current_position is not None:
-            return None
-
-        if prev_bullish:
-            # 多头入场: 多头排列 + BBW允许
-            if not allow_entry:
-                return None
-            direction = TradeDirection.LONG
-            reason = f"Long Entry: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
-            self.current_position = TradeDirection.LONG
-
-        elif prev_bearish:
-            # 空头入场: 空头排列 + BBW允许
-            if not allow_entry:
-                return None
-            direction = TradeDirection.SHORT
-            reason = f"Short Entry: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
-            self.current_position = TradeDirection.SHORT
-
-        else:
-            return None
-
-        return self._create_signal(
-            timestamp=timestamp,
-            direction=direction,
-            entry_price=entry_price,
-            stop_loss=None,
-            take_profit=None,
-            reason=reason,
-            signal_bar_idx=current_idx - 1,
-            execution_bar_idx=current_idx,
-            size=self._calculate_position_size(),
+        return self._generate_entry_signal_v2(
+            prev_bullish, prev_bearish, timestamp, entry_price,
+            prev_close, prev_sma_s, prev_sma_m, prev_sma_l, current_idx,
+            allow_entry, bbw_value, bbw_ma, False, False
         )
+
+    def _generate_entry_signal_v2(
+        self,
+        prev_bullish: bool,
+        prev_bearish: bool,
+        timestamp: datetime,
+        entry_price: float,
+        prev_close: float,
+        prev_sma_s: float,
+        prev_sma_m: float,
+        prev_sma_l: float,
+        current_idx: int,
+        allow_entry: bool,
+        bbw_value: float,
+        bbw_ma: float,
+        sma_bearish_cross: bool,
+        sma_bullish_cross: bool
+    ) -> Optional[TradeSignal]:
+        """
+        生成入场信号（新开仓或反向开仓）
+
+        【重要】与Pine逻辑一致：
+        1. 反向开仓条件: 有持仓 + 趋势排列 + SMA交叉 + BBW允许
+        2. 新开仓条件: 无持仓 + 趋势排列 + BBW允许
+        """
+        # ====================================
+        # 反向开仓检查
+        # Pine: if hasLongPosition and isBearish and smaBearishCross and bbwAllowEntry
+        # ====================================
+        if self.current_position == TradeDirection.LONG:
+            # 持有多头，检查是否反向开空
+            if prev_bearish and sma_bearish_cross and allow_entry:
+                direction = TradeDirection.SHORT
+                reason = f"Reverse to Short: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
+                self.current_position = TradeDirection.SHORT
+                return self._create_signal(
+                    timestamp=timestamp,
+                    direction=direction,
+                    entry_price=entry_price,
+                    stop_loss=None,
+                    take_profit=None,
+                    reason=reason,
+                    signal_bar_idx=current_idx - 1,
+                    execution_bar_idx=current_idx,
+                    size=self._calculate_position_size(),
+                )
+
+        elif self.current_position == TradeDirection.SHORT:
+            # 持有空头，检查是否反向开多
+            if prev_bullish and sma_bullish_cross and allow_entry:
+                direction = TradeDirection.LONG
+                reason = f"Reverse to Long: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
+                self.current_position = TradeDirection.LONG
+                return self._create_signal(
+                    timestamp=timestamp,
+                    direction=direction,
+                    entry_price=entry_price,
+                    stop_loss=None,
+                    take_profit=None,
+                    reason=reason,
+                    signal_bar_idx=current_idx - 1,
+                    execution_bar_idx=current_idx,
+                    size=self._calculate_position_size(),
+                )
+
+        # ====================================
+        # 新开仓检查（无持仓时）
+        # Pine: if not hasPosition and isBullish and bbwAllowEntry
+        # ====================================
+        if self.current_position is None:
+            if prev_bullish and allow_entry:
+                direction = TradeDirection.LONG
+                reason = f"Long Entry: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
+                self.current_position = TradeDirection.LONG
+                return self._create_signal(
+                    timestamp=timestamp,
+                    direction=direction,
+                    entry_price=entry_price,
+                    stop_loss=None,
+                    take_profit=None,
+                    reason=reason,
+                    signal_bar_idx=current_idx - 1,
+                    execution_bar_idx=current_idx,
+                    size=self._calculate_position_size(),
+                )
+
+            elif prev_bearish and allow_entry:
+                direction = TradeDirection.SHORT
+                reason = f"Short Entry: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
+                self.current_position = TradeDirection.SHORT
+                return self._create_signal(
+                    timestamp=timestamp,
+                    direction=direction,
+                    entry_price=entry_price,
+                    stop_loss=None,
+                    take_profit=None,
+                    reason=reason,
+                    signal_bar_idx=current_idx - 1,
+                    execution_bar_idx=current_idx,
+                    size=self._calculate_position_size(),
+                )
+
+        return None
 
     def _create_exit_signal(
         self,

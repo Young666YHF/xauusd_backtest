@@ -205,25 +205,30 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         # 确保价格在合理范围内
         entry_price = max(bar['Low'], min(bar['High'], entry_price))
 
-        # 计算入场滑点(点差的一半)
-        spread_cost = self.config.spread_per_ounce * self.config.contract_size / 2
-        slippage = spread_cost / self.config.contract_size  # 转换为价格单位
+        # 【修复】与Pine一致：执行滑点固定为0.1美元（10点）
+        # 不再把点差的一半作为滑点，点差成本在平仓时扣除
+        slippage = 0.1  # 与Pine的slippage=10点一致
 
         # 【关键】从策略获取当前仓位大小（支持马丁格尔动态调整）
+        # 必须在平仓前获取，确保反向开仓时使用相同的仓位大小
         if hasattr(self, '_strategy') and self._strategy is not None and hasattr(self._strategy, 'get_position_size'):
             signal.size = self._strategy.get_position_size()
 
         if self.position:
             # 检查是否是反向信号
             if signal.direction != self.position.direction:
+                # 【修复】反向开仓时，保存当前仓位大小
+                # Pine的马丁格尔状态在下一根K线才更新，反向开仓应使用原仓位
+                saved_position_size = signal.size
+
                 # 反向信号: 先平仓
-                exit_slippage = self._calculate_exit_slippage(bar['Close'])
+                exit_slippage = slippage  # 使用固定滑点
                 self._close_position(bar['Close'], ExitReason.SIGNAL_REVERSE, exit_slippage)
                 self.signal_exits += 1
 
-                # 【关键】平仓后，策略的马丁格尔状态可能已更新，重新获取仓位大小
-                if hasattr(self, '_strategy') and self._strategy is not None and hasattr(self._strategy, 'get_position_size'):
-                    signal.size = self._strategy.get_position_size()
+                # 【修复】反向开仓使用平仓前的仓位大小，不重新获取
+                # 这样与Pine的行为一致：反向开仓时马丁格尔状态还没更新
+                signal.size = saved_position_size
 
                 # 然后开新仓(如果信号方向明确)
                 if signal.direction in [TradeDirection.LONG, TradeDirection.SHORT]:
@@ -243,9 +248,8 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
 
     def _calculate_exit_slippage(self, price: float) -> float:
         """计算出场滑点"""
-        # 点差成本
-        spread_cost = self.config.spread_per_ounce * self.config.contract_size / 2
-        return spread_cost / self.config.contract_size
+        # 【修复】与Pine一致：固定滑点0.1美元
+        return 0.1
 
     def _close_position(
         self,

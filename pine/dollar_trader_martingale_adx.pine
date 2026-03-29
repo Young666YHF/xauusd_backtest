@@ -20,7 +20,7 @@ strategy("XAUUSD Dollar Trader Martingale BBW Step (SMA 20/50/200)", overlay=tru
          contract_size=100,     // 【关键】1手 = 100盎司，与Python一致
          commission_type=strategy.commission.cash_per_contract,
          commission_value=60.0, // 【关键】$60/手往返成本，与Python一致
-         slippage=10,           // 10点 = $0.1
+         slippage=3,            // 【修复】3点 = $0.03，最小化固定滑点
          calc_on_every_tick=false,
          process_orders_on_close=false,  // 【关键】在K线开盘时执行订单
          max_lines_count=500,
@@ -41,7 +41,7 @@ bbwMaPeriod = input.int(84, "BBW均线周期", minval=50, maxval=150, group=grou
 
 // 马丁格尔参数
 groupMartingale = "阶梯式马丁参数"
-positionSize = input.float(1.0, "基础仓位", minval=0.1, maxval=10.0, step=0.1, group=groupMartingale)
+positionSize = input.float(0.01, "基础仓位", minval=0.01, maxval=10.0, step=0.01, group=groupMartingale)
 martingaleMultiplier = input.float(2.0, "马丁倍数", minval=1.1, maxval=5.0, step=0.1, group=groupMartingale)
 maxMartingaleSteps = input.int(5, "最大阶梯层级", minval=1, maxval=10, group=groupMartingale)
 enableOvershoot = input.bool(true, "启用超调计数", group=groupMartingale)
