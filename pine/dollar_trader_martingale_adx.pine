@@ -17,8 +17,9 @@ strategy("XAUUSD Dollar Trader Martingale BBW Step (SMA 20/50/200)", overlay=tru
          initial_capital=100000,
          default_qty_type=strategy.fixed,
          default_qty_value=1,
+         contract_size=100,     // 【关键】1手 = 100盎司，与Python一致
          commission_type=strategy.commission.cash_per_contract,
-         commission_value=7.0,  // $3.5 单边 = $7 往返
+         commission_value=60.0, // 【关键】$60/手往返成本，与Python一致
          slippage=10,           // 10点 = $0.1
          calc_on_every_tick=false,
          process_orders_on_close=false,  // 【关键】在K线开盘时执行订单
@@ -34,9 +35,9 @@ smaLongPeriod = input.int(200, "长期SMA周期", minval=100, maxval=300, group=
 
 // 布林带参数
 groupBB = "布林带参数"
-bbPeriod = input.int(20, "布林带周期", minval=10, maxval=30, group=groupBB)
+bbPeriod = input.int(36, "布林带周期", minval=10, maxval=50, group=groupBB)  // 优化后: 36
 bbStd = input.float(2.0, "布林带标准差", minval=1.0, maxval=3.0, step=0.1, group=groupBB)
-bbwMaPeriod = input.int(50, "BBW均线周期", minval=20, maxval=100, group=groupBB)
+bbwMaPeriod = input.int(84, "BBW均线周期", minval=50, maxval=150, group=groupBB)  // 优化后: 84
 
 // 马丁格尔参数
 groupMartingale = "阶梯式马丁参数"
