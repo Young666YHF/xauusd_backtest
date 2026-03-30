@@ -47,15 +47,31 @@ xauusd_backtest/
 
 ## 策略
 
-| 策略 | 类型 | 时段 |
-|------|------|------|
-| MeanReversion | 均值回归 | 亚盘 |
-| MomentumBreakout | 动量突破 | 欧美盘 |
-| TrendAngleBreakout | 趋势突破 | 全时段 |
-| DollarTrader | 价格行为 | 全时段 |
-| DollarTraderMartingale | 马丁格尔 | 全时段 |
-| DollarTraderMartingaleADX | 马丁格尔+ADX | 全时段 |
-| DollarTraderMartingaleBBW | 马丁格尔+BBW阶梯 | 全时段 |
+| 策略 | 类型 | 时段 | 说明文档 |
+|------|------|------|----------|
+| MeanReversion | 均值回归 | 亚盘 | - |
+| MomentumBreakout | 动量突破 | 欧美盘 | - |
+| TrendAngleBreakout | 趋势突破 | 全时段 | - |
+| DollarTrader | 价格行为 | 全时段 | - |
+| DollarTraderMartingale | 马丁格尔 | 全时段 | - |
+| DollarTraderMartingaleADX | 马丁格尔+ADX | 全时段 | - |
+| DollarTraderMartingaleBBW | 马丁格尔+BBW阶梯 | 全时段 | - |
+| **BreakoutGrid** | **突破网格** | **全时段** | **[查看](strategies/docs/breakout_grid.md)** |
+
+## 新增策略流程
+
+每次新增策略时，按以下流程操作：
+
+1. **创建策略代码**：`strategies/{strategy_name}.py`
+2. **创建说明文档**：`strategies/docs/{strategy_name}.md`
+3. **更新策略列表**：`strategies/__init__.py` 中导入并注册策略
+4. **更新README**：将策略添加到上表，并链接到说明文档
+5. **创建专用引擎**（如需）：`engines/{strategy_name}_engine.py`
+
+**后续工作规范**：
+- 涉及策略相关工作时，**先读取说明文档**
+- 策略更新时，**同步更新说明文档**
+- 说明文档应包含：参数、逻辑、使用示例、注意事项
 
 ## 引擎
 
@@ -81,5 +97,4 @@ python run_optimization.py --strategy mean_reversion --n-trials 300
 ## 多平台同步
 
 Python 策略修改后，同步更新 `mt4/` 和 `pine/`。
-
 系统修改后，检查 `web/` 是否需同步。
