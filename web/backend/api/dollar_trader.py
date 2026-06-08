@@ -10,6 +10,7 @@ import pandas as pd
 from pathlib import Path
 import sys
 import os
+import logging
 
 # 添加项目根目录到路径
 backend_dir = os.path.dirname(os.path.dirname(__file__))
@@ -18,9 +19,11 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 from strategies.dollar_trader import DollarTraderStrategy, calculate_dollar_trader_indicators
-from core.config import TradingConfig
+from core.config import TradingConfig, get_config
 from engines.dollar_trader_engine import DollarTraderBacktestEngine
 from core.types import TradeDirection
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/dollar-trader", tags=["dollar-trader"])
 
@@ -36,7 +39,6 @@ class DollarTraderBacktestRequest(BaseModel):
     initial_capital: float = 100000.0
     contract_size: int = 100
     spread_per_lot: float = 60.0
-    data_dir: str = "/home/ctyun/xauusd_data"
 
 
 class TradeRecord(BaseModel):
@@ -108,7 +110,7 @@ def load_kline_data(data_dir: str, start_date: str, end_date: str) -> pd.DataFra
 
     dfs = []
     for month_str in months:
-        filepath = kline_dir / f"XAUUSD_{month_str}.csv"
+        filepath = kline_dir / f"XAUUSD_BID_15m_{month_str.replace('-', '')}.csv"
         if filepath.exists():
             df = pd.read_csv(filepath, index_col=0, parse_dates=True)
             dfs.append(df)
@@ -128,9 +130,10 @@ def load_kline_data(data_dir: str, start_date: str, end_date: str) -> pd.DataFra
 async def run_backtest(request: DollarTraderBacktestRequest):
     """运行美元策略回测"""
     try:
-        # 加载数据
+        # 加载数据（使用服务端配置，忽略用户传入的路径）
+        data_dir = get_config().data.data_dir
         ohlc_df = load_kline_data(
-            request.data_dir,
+            data_dir,
             request.start_date,
             request.end_date
         )
@@ -232,9 +235,10 @@ async def run_backtest(request: DollarTraderBacktestRequest):
         )
 
     except Exception as e:
+        logger.error(f"Backtest failed: {e}", exc_info=True)
         return DollarTraderBacktestResponse(
             success=False,
-            error=str(e)
+            error="Internal server error. Please check your parameters and try again."
         )
 
 

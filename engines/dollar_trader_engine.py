@@ -37,14 +37,15 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
     def __init__(
         self,
         config: TradingConfig,
-        execution_model: Optional[ExecutionModel] = None
+        execution_model: Optional[ExecutionModel] = None,
+        risk_manager=None
     ):
         # 【重要】强制使用零佣金模型（点差已包含佣金）
         # 避免入场时重复扣除佣金
         if execution_model is None:
             execution_model = ExecutionModel(commission_per_lot=0.0)
 
-        super().__init__(config, execution_model)
+        super().__init__(config, execution_model, risk_manager)
 
         # 统计信息
         self.long_trades = 0

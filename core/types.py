@@ -255,6 +255,16 @@ class BacktestResult:
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
 
+    # 初始资金
+    initial_capital: float = 100000.0
+
+    @property
+    def final_capital(self) -> float:
+        """最终资金：优先从权益曲线末值获取，否则用初始资金+总盈亏"""
+        if self.equity_curve:
+            return self.equity_curve[-1]
+        return self.initial_capital + self.total_pnl
+
     def calculate_metrics(self):
         """计算衍生指标"""
         if self.total_trades > 0:

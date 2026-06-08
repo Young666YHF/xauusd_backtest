@@ -1,0 +1,82 @@
+# Git
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs and results
+logs/
+results/
+*.log
+optimization_results/
+
+# Data (large files, mounted as volume)
+data/
+xauusd_data/
+*.csv
+*.pkl
+*.pickle
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+*.env
+secrets.py
+config_local.py
+
+# Documentation
+docs/
+*.md
+
+# Tests (keep tests/ in image for runtime validation, exclude large fixtures)
+tests/fixtures/
+
+# Debug scripts
+debug_*.py
+
+# Frontend dev files
+web/frontend/node_modules/
+web/frontend/src/
+web/frontend/*.config.*
+web/frontend/*.json
+!web/frontend/dist/
+
+# Numba cache
+.numba_cache/

@@ -38,13 +38,18 @@ class BreakoutGridEngine(BaseBacktestEngine):
     def __init__(
         self,
         config: TradingConfig,
-        execution_model: Optional[ExecutionModel] = None
+        execution_model: Optional[ExecutionModel] = None,
+        max_total_loss_pct: float = 0.05,
+        risk_manager=None
     ):
         # 使用零佣金模型（点差成本在平仓时计算）
         if execution_model is None:
             execution_model = ExecutionModel(commission_per_lot=0.0)
 
-        super().__init__(config, execution_model)
+        super().__init__(config, execution_model, risk_manager)
+
+        # 全局止损配置
+        self.max_total_loss_pct = max_total_loss_pct
 
         # 网格状态追踪
         self.grid_positions: Dict[int, Dict[str, Any]] = {}  # level -> {direction, size, entry_price, tp_price}
@@ -56,6 +61,8 @@ class BreakoutGridEngine(BaseBacktestEngine):
         self.long_exits = 0
         self.short_exits = 0
         self.take_profit_exits = 0
+        self.time_stop_exits = 0
+        self.global_stop_loss_exits = 0
 
         # 策略引用
         self._strategy = None
@@ -71,6 +78,8 @@ class BreakoutGridEngine(BaseBacktestEngine):
         self.long_exits = 0
         self.short_exits = 0
         self.take_profit_exits = 0
+        self.time_stop_exits = 0
+        self.global_stop_loss_exits = 0
         self._strategy = None
         self._tick_df = None
 
@@ -137,29 +146,58 @@ class BreakoutGridEngine(BaseBacktestEngine):
         return self._build_result()
 
     def _initialize_grid_strategy(self, bar: pd.Series, timestamp: datetime):
-        """初始化网格策略"""
+        """初始化网格策略并同步初始仓位"""
         if self._strategy is None:
             return
 
         price = bar['Close']
-        self._strategy.on_tick(
-            TickData(timestamp=timestamp, bid=price-0.05, ask=price+0.05),
-            timestamp
-        )
+        tick_data = TickData(timestamp=timestamp, bid=price-0.05, ask=price+0.05)
+        self._strategy.on_tick(tick_data, timestamp)
+
+        # 同步策略的初始仓位到引擎
+        if self._strategy.is_initialized:
+            for level, grid in self._strategy.grids.items():
+                if grid.long_position > 0:
+                    tp_price = price + self._strategy.params.get('take_profit', 5.0)
+                    self._open_grid_position(level, TradeDirection.LONG, grid.long_position, price, tp_price, timestamp)
+                elif grid.short_position > 0:
+                    tp_price = price - self._strategy.params.get('take_profit', 5.0)
+                    self._open_grid_position(level, TradeDirection.SHORT, grid.short_position, price, tp_price, timestamp)
 
     def _prepare_tick_mapping(
         self,
         tick_df: pd.DataFrame,
         bar_timestamps: pd.DatetimeIndex
     ) -> Dict[int, Tuple[int, int]]:
-        """准备Tick数据映射"""
-        tick_times = tick_df.index.values
-        bar_times = bar_timestamps.values
+        """准备Tick数据映射 - 使用高效的一次性遍历"""
+        tick_times = tick_df.index
+        bar_times = bar_timestamps
+        n_bars = len(bar_times)
+        n_ticks = len(tick_times)
 
-        start_indices = np.searchsorted(tick_times, bar_times, side='left')
-        end_indices = np.searchsorted(tick_times, bar_times, side='right')
+        mapping = {}
+        tick_idx = 0
 
-        return {i: (int(start_indices[i]), int(end_indices[i])) for i in range(len(bar_times))}
+        # 高效的一次性遍历: O(n+m) 而非 O(n*m)
+        for bar_idx in range(n_bars):
+            bar_time = bar_times[bar_idx]
+
+            # 跳过当前bar之前的ticks
+            while tick_idx < n_ticks and tick_times[tick_idx] < bar_time:
+                tick_idx += 1
+
+            start_idx = tick_idx
+
+            # 找到属于当前bar的所有ticks
+            if bar_idx < n_bars - 1:
+                next_bar_time = bar_times[bar_idx + 1]
+                while tick_idx < n_ticks and tick_times[tick_idx] < next_bar_time:
+                    tick_idx += 1
+
+            if start_idx < tick_idx:
+                mapping[bar_idx] = (start_idx, tick_idx)
+
+        return mapping
 
     def _process_ticks_for_bar(
         self,
@@ -188,25 +226,80 @@ class BreakoutGridEngine(BaseBacktestEngine):
             # 检查止盈
             self._check_take_profit(tick_data.mid, tick.name)
 
+            # 检查全局止损
+            if self._check_global_stop_loss(tick_data.mid, tick.name):
+                break  # 全局止损触发，停止处理该bar的后续tick
+
             # 更新策略并检查信号
-            signal = self._strategy.on_tick(tick_data, tick.name)
-            if signal:
+            signals = self._strategy.on_tick(tick_data, tick.name)
+            for signal in signals:
                 self._execute_signal(signal, tick_data, tick.name)
 
     def _process_bar(self, bar: pd.Series, timestamp: datetime):
         """使用K线数据处理（简化模式）"""
         price = bar['Close']
+        high = bar['High']
+        low = bar['Low']
 
-        # 检查止盈
-        self._check_take_profit(price, timestamp)
+        # 检查止盈（使用高低价）
+        self._check_take_profit_bar(bar, timestamp)
+
+        # 检查全局止损
+        self._check_global_stop_loss(price, timestamp)
 
         # 更新策略
         if self._strategy:
-            signal = self._strategy.generate_signal(self._df, self._current_bar_idx)
-            if signal:
+            # 先更新价格（这会更新挂单布局）
+            self._strategy._on_price_update(price, timestamp)
+
+            # 检查是否有挂单被触发（使用K线高低价模拟价格穿越）
+            triggered_signals = self._check_pending_orders_with_ohlc(bar, timestamp)
+
+            for signal in triggered_signals:
                 mid_price = (bar['High'] + bar['Low']) / 2
                 tick_data = TickData(timestamp=timestamp, bid=mid_price-0.05, ask=mid_price+0.05)
                 self._execute_signal(signal, tick_data, timestamp)
+
+    def _check_global_stop_loss(self, current_price: float, timestamp: datetime) -> bool:
+        """检查全局止损
+
+        计算所有网格持仓的总未实现盈亏，当亏损超过账户权益的阈值时，
+        强制平掉所有持仓。
+
+        Args:
+            current_price: 当前价格
+            timestamp: 当前时间戳
+
+        Returns:
+            bool: 是否触发了全局止损
+        """
+        if not self.grid_positions:
+            return False
+
+        # 计算总未实现盈亏
+        total_unrealized_pnl = 0.0
+        for level, pos in self.grid_positions.items():
+            if pos['direction'] == TradeDirection.LONG:
+                unrealized = (current_price - pos['entry_price']) * self.config.contract_size * pos['size']
+            else:
+                unrealized = (pos['entry_price'] - current_price) * self.config.contract_size * pos['size']
+            total_unrealized_pnl += unrealized
+
+        # 计算当前权益（包含未实现盈亏）
+        current_equity = self.capital + total_unrealized_pnl
+
+        # 计算最大允许亏损金额（基于当前权益）
+        max_loss_amount = current_equity * self.max_total_loss_pct
+
+        # 检查是否超过止损阈值（未实现亏损为负值）
+        if total_unrealized_pnl < -max_loss_amount:
+            # 强制平掉所有持仓
+            for level in list(self.grid_positions.keys()):
+                self._close_grid_position(level, current_price, timestamp, ExitReason.STOP_LOSS)
+            self.global_stop_loss_exits += 1
+            return True
+
+        return False
 
     def _check_take_profit(self, price: float, timestamp: datetime):
         """检查止盈条件"""
@@ -247,25 +340,15 @@ class BreakoutGridEngine(BaseBacktestEngine):
         # 开仓
         self._open_grid_position(grid_level, signal.direction, signal.size or 0.01, entry_price, take_profit, timestamp)
 
-        # 通知策略
-        if self._strategy:
-            # 构建模拟交易记录（入场）
-            self._strategy.on_trade_completed({
-                'profit': 0,
-                'direction': signal.direction,
-                'entry_price': entry_price,
-                'size': signal.size or 0.01,
-                'exit_reason': ExitReason.NONE,
-                'metadata': {'grid_level': grid_level, 'is_entry': True}
-            })
-
     def _execute_exit_signal(self, signal: TradeSignal, price: float, timestamp: datetime):
         """执行平仓信号"""
         grid_level = signal.metadata.get('grid_level', 0)
         original_direction = signal.metadata.get('original_direction')
+        is_time_exit = signal.metadata.get('is_time_exit', False)
 
         if grid_level in self.grid_positions:
-            self._close_grid_position(grid_level, price, timestamp, ExitReason.TAKE_PROFIT)
+            exit_reason = ExitReason.TIME_STOP if is_time_exit else ExitReason.TAKE_PROFIT
+            self._close_grid_position(grid_level, price, timestamp, exit_reason)
 
     def _open_grid_position(
         self,
@@ -357,8 +440,12 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
         if exit_reason == ExitReason.TAKE_PROFIT:
             self.take_profit_exits += 1
+        elif exit_reason == ExitReason.TIME_STOP:
+            self.time_stop_exits += 1
+        elif exit_reason == ExitReason.STOP_LOSS:
+            self.global_stop_loss_exits += 1
 
-        # 通知策略
+        # 通知策略 - 关键修复：确保策略知道持仓已被平掉
         if self._strategy:
             self._strategy.on_trade_completed({
                 'profit': pnl,
@@ -374,6 +461,30 @@ class BreakoutGridEngine(BaseBacktestEngine):
         del self.grid_positions[level]
 
         return trade
+
+    def _check_take_profit_bar(self, bar: pd.Series, timestamp: datetime):
+        """使用K线数据检查止盈（检查高低价是否触及止盈位）"""
+        high = bar['High']
+        low = bar['Low']
+
+        for level, pos in list(self.grid_positions.items()):
+            tp_price = pos['take_profit']
+            direction = pos['direction']
+
+            # 多单止盈：高价触及或超过止盈位
+            if direction == TradeDirection.LONG and high >= tp_price:
+                self._close_grid_position(level, tp_price, timestamp, ExitReason.TAKE_PROFIT)
+            # 空单止盈：低价触及或低于止盈位
+            elif direction == TradeDirection.SHORT and low <= tp_price:
+                self._close_grid_position(level, tp_price, timestamp, ExitReason.TAKE_PROFIT)
+
+    def _check_pending_orders_with_ohlc(self, bar: pd.Series, timestamp: datetime) -> List[TradeSignal]:
+        """使用K线高低价检查网格穿越并生成信号"""
+        if not self._strategy:
+            return []
+
+        # 调用策略的generate_signal获取K线模式下触发的信号
+        return self._strategy.generate_signal(self._df, self._current_bar_idx)
 
     def _close_all_positions(self, last_bar: pd.Series, timestamp: datetime):
         """强制平仓所有剩余持仓"""
@@ -412,6 +523,9 @@ class BreakoutGridEngine(BaseBacktestEngine):
             'long_exits': self.long_exits,
             'short_exits': self.short_exits,
             'take_profit_exits': self.take_profit_exits,
+            'time_stop_exits': self.time_stop_exits,
+            'global_stop_loss_exits': self.global_stop_loss_exits,
+            'max_total_loss_pct': self.max_total_loss_pct,
             'final_long_position': sum(1 for p in self.grid_positions.values() if p['direction'] == TradeDirection.LONG),
             'final_short_position': sum(1 for p in self.grid_positions.values() if p['direction'] == TradeDirection.SHORT),
         }

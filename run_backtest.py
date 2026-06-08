@@ -22,6 +22,7 @@ import pandas as pd
 from core.config import Config, get_config
 from core.indicators import add_all_indicators
 from core.data_loader import DataLoader
+from core.risk_manager import RiskManager
 from strategies import StrategyRegistry
 from engines import CandleBacktestEngine, TickBacktestEngine
 
@@ -132,10 +133,13 @@ def create_engine(config: Config, args):
 
     trading_config = config.trading
 
+    # 创建风控管理器
+    risk_manager = RiskManager(config=trading_config)
+
     if args.engine == 'tick':
-        return TickBacktestEngine(trading_config)
+        return TickBacktestEngine(trading_config, risk_manager=risk_manager)
     else:
-        return CandleBacktestEngine(trading_config)
+        return CandleBacktestEngine(trading_config, risk_manager=risk_manager)
 
 
 def run_backtest(args):

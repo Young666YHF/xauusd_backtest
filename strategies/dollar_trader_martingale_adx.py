@@ -21,20 +21,18 @@ Dollar Trader Martingale BBW 增强策略 (阶梯式马丁)
 - 超调计数机制，避免最大层数后立即降仓
 
 作者: Claude
-版本: 2.0.0
+版本: 3.0.0
 """
 
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
-import numpy as np
-from datetime import datetime
 
-from strategies.base import BaseStrategy
+from strategies.dollar_trader_base import DollarTraderBaseStrategy, calculate_dollar_trader_base_indicators
 from core.types import TradeSignal, TradeDirection, SignalType, ExitReason
 from core.indicators import calculate_sma, calculate_bollinger_bands, calculate_bbw
 
 
-class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
+class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
     """
     Dollar Trader Martingale BBW 阶梯式增强策略
 
@@ -57,7 +55,7 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
                 - sma_short: 短期SMA周期 (默认20)
                 - sma_medium: 中期SMA周期 (默认50)
                 - sma_long: 长期SMA周期 (默认200)
-                - position_size: 基础仓位大小 (默认1.0)
+                - position_size: 基础仓位大小 (默认0.01)
                 - martingale_multiplier: 马丁格尔倍数 (默认2.0)
                 - max_martingale_steps: 最大阶梯层级 (默认5)
                 - bb_period: 布林带周期 (默认20)
@@ -66,9 +64,6 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
             strategy_id: 策略标识
         """
         super().__init__(params, strategy_id or "DollarTraderMartingaleBBWStep")
-
-        # 追踪当前持仓方向
-        self.current_position: Optional[TradeDirection] = None
 
         # 马丁格尔阶梯状态
         self.martingale_step: int = 0
@@ -183,16 +178,22 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
                     self.undershoot_count += 1
                 # 如果未启用欠调，不做任何操作
 
-    def _check_bbw_for_entry(self, df: pd.DataFrame, current_idx: int) -> Tuple[bool, float, float]:
+    def _check_entry_filters(
+        self,
+        df: pd.DataFrame,
+        current_idx: int,
+        prev_bar: pd.Series
+    ) -> Tuple[bool, Dict[str, Any]]:
         """
         检查BBW是否满足开仓条件
 
         Args:
             df: DataFrame包含BBW数据
             current_idx: 当前索引
+            prev_bar: 上一根K线数据
 
         Returns:
-            (是否允许开仓, 当前BBW值, BBW均线值)
+            (是否允许开仓, 附加信息字典)
         """
         bbw_col = 'BBW'
         bbw_ma_col = f"BBW_MA_{self.params['bbw_ma_period']}"
@@ -200,44 +201,26 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
         # 确保BBW列存在
         if bbw_col not in df.columns or bbw_ma_col not in df.columns:
             # 如果没有BBW数据，默认允许开仓（保守策略）
-            return True, 0.0, 0.0
+            return True, {}
 
         # 获取当前BBW值（上一根已收盘K线）
-        if current_idx - 1 < len(df):
-            prev_bar = df.iloc[current_idx - 1]
-            bbw_value = prev_bar[bbw_col]
-            bbw_ma = prev_bar[bbw_ma_col]
+        bbw_value = prev_bar[bbw_col]
+        bbw_ma = prev_bar[bbw_ma_col]
 
-            self.last_bbw_value = bbw_value
-            self.last_bbw_ma = bbw_ma
+        self.last_bbw_value = bbw_value
+        self.last_bbw_ma = bbw_ma
 
         # 【Bug修复】数据无效时应该拒绝开仓，与Pine保持一致
         # bbwAllowEntry = not na(prevBBW) and not na(prevBBW_MA) and (prevBBW > prevBBW_MA)
         if pd.notna(bbw_value) and pd.notna(bbw_ma):
             allow_entry = bbw_value > bbw_ma
-            return allow_entry, bbw_value, bbw_ma
+            return allow_entry, {'BBW': bbw_value, 'BBW_MA': bbw_ma, 'Step': self.martingale_step}
 
         # 数据无效，拒绝开仓（与Pine一致）
-        return False, 0.0, 0.0
+        return False, {}
 
-    def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        **kwargs
-    ) -> Optional[TradeSignal]:
-        """
-        生成交易信号
-
-        Args:
-            df: 包含指标的DataFrame
-            current_idx: 当前K线索引
-            **kwargs: 额外上下文
-
-        Returns:
-            TradeSignal对象或None
-        """
-        # 检查数据充足性
+    def _validate_data(self, df: pd.DataFrame, current_idx: int) -> Optional[Tuple[str, str, str]]:
+        """验证数据充足性（考虑BBW需要额外数据）"""
         min_bars_needed = max(
             self.params['sma_long'],
             self.params['bb_period'] + self.params['bbw_ma_period']
@@ -246,311 +229,11 @@ class DollarTraderMartingaleBBWStepStrategy(BaseStrategy):
         if current_idx < min_bars_needed:
             return None
 
-        # 获取指标列名
-        sma_s_col = f"SMA_{self.params['sma_short']}"
-        sma_m_col = f"SMA_{self.params['sma_medium']}"
-        sma_l_col = f"SMA_{self.params['sma_long']}"
+        return super()._validate_data(df, current_idx)
 
-        # 检查必要的指标列是否存在
-        for col in [sma_s_col, sma_m_col, sma_l_col]:
-            if col not in df.columns:
-                raise ValueError(f"Missing required column: {col}. Please ensure SMA indicators are calculated.")
-
-        # 【关键】使用shift(1)获取上一根K线的状态，避免未来函数
-        # 获取上一根K线(已收盘)的指标值
-        prev_bar = df.iloc[current_idx - 1]
-        current_bar = df.iloc[current_idx]
-        current_timestamp = df.index[current_idx]
-
-        # 上一根K线的收盘价和均线值(用于信号判断)
-        prev_close = prev_bar['Close']
-        prev_sma_s = prev_bar[sma_s_col]
-        prev_sma_m = prev_bar[sma_m_col]
-        prev_sma_l = prev_bar[sma_l_col]
-
-        # 当前K线开盘价(用于入场执行)
-        current_open = current_bar['Open']
-
-        # 检查指标有效性
-        if pd.isna(prev_sma_s) or pd.isna(prev_sma_m) or pd.isna(prev_sma_l):
-            return None
-
-        signal = None
-
-        # === 判断趋势状态(基于上一根K线) ===
-        # 多头排列: C > SMA_S > SMA_M > SMA_L
-        prev_bullish = (prev_close > prev_sma_s and
-                        prev_sma_s > prev_sma_m and
-                        prev_sma_m > prev_sma_l)
-
-        # 空头排列: C < SMA_S < SMA_M < SMA_L
-        prev_bearish = (prev_close < prev_sma_s and
-                        prev_sma_s < prev_sma_m and
-                        prev_sma_m < prev_sma_l)
-
-        # SMA交叉判断(用于出场)
-        # 需要前两根K线的SMA状态来判断交叉
-        if current_idx >= 2:
-            prev2_bar = df.iloc[current_idx - 2]
-            prev2_sma_s = prev2_bar[sma_s_col]
-            prev2_sma_m = prev2_bar[sma_m_col]
-
-            # 短期下穿中期(死叉) - 多头平仓信号
-            sma_bearish_cross = (prev2_sma_s >= prev2_sma_m) and (prev_sma_s < prev_sma_m)
-            # 短期上穿中期(金叉) - 空头平仓信号
-            sma_bullish_cross = (prev2_sma_s <= prev2_sma_m) and (prev_sma_s > prev_sma_m)
-        else:
-            sma_bearish_cross = False
-            sma_bullish_cross = False
-
-        # === 生成交易信号 ===
-        # 检查BBW是否允许开仓（入场时才检查）
-        allow_entry, bbw_value, bbw_ma = self._check_bbw_for_entry(df, current_idx)
-
-        # 【修复】严格按照Pine逻辑：
-        # Pine的出场和反向开仓是独立判断的，但在同一根K线上执行
-        # - 如果满足出场条件 + 反向开仓条件 -> 返回反向开仓信号（引擎会先平仓再开仓）
-        # - 如果只满足出场条件 -> 返回平仓信号
-        # - 如果只满足入场条件 -> 返回入场信号
-
-        signal = None
-
-        # ====================================
-        # 持有多头时的处理
-        # ====================================
-        if self.current_position == TradeDirection.LONG:
-            if sma_bearish_cross:
-                # 满足出场条件
-                if prev_bearish and allow_entry:
-                    # 【关键】Pine: 同时满足反向开空条件 -> 返回做空信号
-                    # 引擎会先平多再开空
-                    signal = self._create_signal(
-                        timestamp=current_timestamp,
-                        direction=TradeDirection.SHORT,
-                        entry_price=current_open,
-                        stop_loss=None,
-                        take_profit=None,
-                        reason=f"Reverse to Short: SMA cross + BBW({bbw_value:.2f})>MA({bbw_ma:.2f})",
-                        signal_bar_idx=current_idx - 1,
-                        execution_bar_idx=current_idx,
-                        size=self._calculate_position_size(),
-                    )
-                    self.current_position = TradeDirection.SHORT
-                else:
-                    # 只平仓，不反向开仓
-                    signal = TradeSignal(
-                        timestamp=current_timestamp,
-                        signal_type=SignalType.CLOSE_LONG,
-                        strategy_id=self.strategy_id,
-                        direction=TradeDirection.FLAT,
-                        entry_price=current_open,
-                        reason=f"Long Exit: SMA_20 crossed below SMA_50 (no reverse)",
-                        signal_bar_index=current_idx - 1,
-                        execution_bar_index=current_idx,
-                    )
-                    self.current_position = None
-
-        # ====================================
-        # 持有空头时的处理
-        # ====================================
-        elif self.current_position == TradeDirection.SHORT:
-            if sma_bullish_cross:
-                # 满足出场条件
-                if prev_bullish and allow_entry:
-                    # 【关键】Pine: 同时满足反向开多条件 -> 返回做多信号
-                    signal = self._create_signal(
-                        timestamp=current_timestamp,
-                        direction=TradeDirection.LONG,
-                        entry_price=current_open,
-                        stop_loss=None,
-                        take_profit=None,
-                        reason=f"Reverse to Long: SMA cross + BBW({bbw_value:.2f})>MA({bbw_ma:.2f})",
-                        signal_bar_idx=current_idx - 1,
-                        execution_bar_idx=current_idx,
-                        size=self._calculate_position_size(),
-                    )
-                    self.current_position = TradeDirection.LONG
-                else:
-                    # 只平仓，不反向开仓
-                    signal = TradeSignal(
-                        timestamp=current_timestamp,
-                        signal_type=SignalType.CLOSE_SHORT,
-                        strategy_id=self.strategy_id,
-                        direction=TradeDirection.FLAT,
-                        entry_price=current_open,
-                        reason=f"Short Exit: SMA_20 crossed above SMA_50 (no reverse)",
-                        signal_bar_index=current_idx - 1,
-                        execution_bar_index=current_idx,
-                    )
-                    self.current_position = None
-
-        # ====================================
-        # 无持仓时的入场检查
-        # Pine: if not hasPosition and isBullish/Bearish and bbwAllowEntry
-        # ====================================
-        if signal is None and self.current_position is None:
-            signal = self._generate_entry_signal_v2(
-                prev_bullish, prev_bearish, current_timestamp, current_open,
-                prev_close, prev_sma_s, prev_sma_m, prev_sma_l, current_idx,
-                allow_entry, bbw_value, bbw_ma, sma_bearish_cross, sma_bullish_cross
-            )
-
-        return signal
-
-    def _generate_entry_signal(
-        self,
-        prev_bullish: bool,
-        prev_bearish: bool,
-        timestamp: datetime,
-        entry_price: float,
-        prev_close: float,
-        prev_sma_s: float,
-        prev_sma_m: float,
-        prev_sma_l: float,
-        current_idx: int,
-        allow_entry: bool,
-        bbw_value: float,
-        bbw_ma: float
-    ) -> Optional[TradeSignal]:
-        """
-        生成新开仓入场信号（旧方法，保留向后兼容）
-        """
-        return self._generate_entry_signal_v2(
-            prev_bullish, prev_bearish, timestamp, entry_price,
-            prev_close, prev_sma_s, prev_sma_m, prev_sma_l, current_idx,
-            allow_entry, bbw_value, bbw_ma, False, False
-        )
-
-    def _generate_entry_signal_v2(
-        self,
-        prev_bullish: bool,
-        prev_bearish: bool,
-        timestamp: datetime,
-        entry_price: float,
-        prev_close: float,
-        prev_sma_s: float,
-        prev_sma_m: float,
-        prev_sma_l: float,
-        current_idx: int,
-        allow_entry: bool,
-        bbw_value: float,
-        bbw_ma: float,
-        sma_bearish_cross: bool,
-        sma_bullish_cross: bool
-    ) -> Optional[TradeSignal]:
-        """
-        生成入场信号（新开仓或反向开仓）
-
-        【重要】与Pine逻辑一致：
-        1. 反向开仓条件: 有持仓 + 趋势排列 + SMA交叉 + BBW允许
-        2. 新开仓条件: 无持仓 + 趋势排列 + BBW允许
-        """
-        # ====================================
-        # 反向开仓检查
-        # Pine: if hasLongPosition and isBearish and smaBearishCross and bbwAllowEntry
-        # ====================================
-        if self.current_position == TradeDirection.LONG:
-            # 持有多头，检查是否反向开空
-            if prev_bearish and sma_bearish_cross and allow_entry:
-                direction = TradeDirection.SHORT
-                reason = f"Reverse to Short: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
-                self.current_position = TradeDirection.SHORT
-                return self._create_signal(
-                    timestamp=timestamp,
-                    direction=direction,
-                    entry_price=entry_price,
-                    stop_loss=None,
-                    take_profit=None,
-                    reason=reason,
-                    signal_bar_idx=current_idx - 1,
-                    execution_bar_idx=current_idx,
-                    size=self._calculate_position_size(),
-                )
-
-        elif self.current_position == TradeDirection.SHORT:
-            # 持有空头，检查是否反向开多
-            if prev_bullish and sma_bullish_cross and allow_entry:
-                direction = TradeDirection.LONG
-                reason = f"Reverse to Long: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
-                self.current_position = TradeDirection.LONG
-                return self._create_signal(
-                    timestamp=timestamp,
-                    direction=direction,
-                    entry_price=entry_price,
-                    stop_loss=None,
-                    take_profit=None,
-                    reason=reason,
-                    signal_bar_idx=current_idx - 1,
-                    execution_bar_idx=current_idx,
-                    size=self._calculate_position_size(),
-                )
-
-        # ====================================
-        # 新开仓检查（无持仓时）
-        # Pine: if not hasPosition and isBullish and bbwAllowEntry
-        # ====================================
-        if self.current_position is None:
-            if prev_bullish and allow_entry:
-                direction = TradeDirection.LONG
-                reason = f"Long Entry: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
-                self.current_position = TradeDirection.LONG
-                return self._create_signal(
-                    timestamp=timestamp,
-                    direction=direction,
-                    entry_price=entry_price,
-                    stop_loss=None,
-                    take_profit=None,
-                    reason=reason,
-                    signal_bar_idx=current_idx - 1,
-                    execution_bar_idx=current_idx,
-                    size=self._calculate_position_size(),
-                )
-
-            elif prev_bearish and allow_entry:
-                direction = TradeDirection.SHORT
-                reason = f"Short Entry: BBW({bbw_value:.2f})>MA({bbw_ma:.2f}) Step={self.martingale_step}"
-                self.current_position = TradeDirection.SHORT
-                return self._create_signal(
-                    timestamp=timestamp,
-                    direction=direction,
-                    entry_price=entry_price,
-                    stop_loss=None,
-                    take_profit=None,
-                    reason=reason,
-                    signal_bar_idx=current_idx - 1,
-                    execution_bar_idx=current_idx,
-                    size=self._calculate_position_size(),
-                )
-
-        return None
-
-    def _create_exit_signal(
-        self,
-        timestamp: datetime,
-        direction: TradeDirection,
-        entry_price: float,
-        prev_sma_s: float,
-        prev_sma_m: float,
-        current_idx: int,
-        is_long_exit: bool
-    ) -> TradeSignal:
-        """生成出场信号"""
-        if is_long_exit:
-            reason = f"Long Exit: SMA_20({prev_sma_s:.2f}) crossed below SMA_50({prev_sma_m:.2f})"
-        else:
-            reason = f"Short Exit: SMA_20({prev_sma_s:.2f}) crossed above SMA_50({prev_sma_m:.2f})"
-
-        return self._create_signal(
-            timestamp=timestamp,
-            direction=direction,
-            entry_price=entry_price,
-            stop_loss=None,
-            take_profit=None,
-            reason=reason,
-            signal_bar_idx=current_idx - 1,
-            execution_bar_idx=current_idx,
-            size=self._calculate_position_size(),
-        )
+    def _get_position_size_for_signal(self) -> Optional[float]:
+        """获取当前信号应使用的仓位大小"""
+        return self.current_position_size
 
     def on_trade_completed(self, trade_record: Dict[str, Any]):
         """
@@ -632,12 +315,7 @@ def calculate_dollar_trader_martingale_bbw_indicators(
     Returns:
         添加指标后的DataFrame
     """
-    result = df.copy()
-
-    # 计算三条SMA
-    result[f'SMA_{sma_short}'] = calculate_sma(result['Close'], sma_short)
-    result[f'SMA_{sma_medium}'] = calculate_sma(result['Close'], sma_medium)
-    result[f'SMA_{sma_long}'] = calculate_sma(result['Close'], sma_long)
+    result = calculate_dollar_trader_base_indicators(df, sma_short, sma_medium, sma_long)
 
     # 计算布林带
     bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(

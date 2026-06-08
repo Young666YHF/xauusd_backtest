@@ -267,7 +267,9 @@ def calculate_vwap(df: pd.DataFrame, reset_hour_et: int = 17) -> pd.Series:
             # 17:00之前的数据属于前一天
             mask_before_reset = hour_et < reset_hour_et
             trading_day.loc[mask_before_reset] = trading_day.loc[mask_before_reset] - pd.Timedelta(days=1)
-        except:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"VWAP timezone conversion failed: {e}, falling back to local date")
             trading_day = pd.Series(df.index.date, index=df.index)
     else:
         trading_day = pd.Series(df.index.date, index=df.index)
@@ -444,7 +446,7 @@ def add_all_indicators(
     result['MACD_Hist'] = hist
 
     # ADX
-    adx, plus_di, minus_di = calculate_adx(result)
+    adx, plus_di, minus_di = calculate_adx(result, atr_period)
     result['ADX'] = adx
     result['Plus_DI'] = plus_di
     result['Minus_DI'] = minus_di

@@ -18,6 +18,7 @@ from core.types import (
 )
 from core.config import TradingConfig
 from core.events import EventBus, EventType
+from core.risk_manager import RiskManager
 
 
 class StrategyCategory(Enum):
@@ -95,10 +96,12 @@ class BaseBacktestEngine(ABC):
     def __init__(
         self,
         config: TradingConfig,
-        execution_model: Optional[ExecutionModel] = None
+        execution_model: Optional[ExecutionModel] = None,
+        risk_manager: Optional[RiskManager] = None
     ):
         self.config = config
         self.execution = execution_model or ExecutionModel()
+        self.risk_manager = risk_manager
         self.event_bus = EventBus()
 
         # 状态
@@ -160,8 +163,21 @@ class BaseBacktestEngine(ABC):
         signal: TradeSignal,
         filled_price: float,
         slippage: float = 0.0
-    ) -> Position:
+    ) -> Optional[Position]:
         """开仓 - 支持资金百分比风险管理"""
+
+        # 风控检查
+        if self.risk_manager is not None:
+            current_equity = self.get_current_equity()
+            can_trade, reason = self.risk_manager.can_trade(current_equity)
+            if not can_trade:
+                self.event_bus.emit_new(
+                    EventType.ORDER_REJECTED,
+                    source=self.__class__.__name__,
+                    signal=signal,
+                    reason=reason
+                )
+                return None
 
         # 计算仓位大小
         if signal.size is not None:
@@ -285,6 +301,11 @@ class BaseBacktestEngine(ABC):
             self.winning_trades += 1
         else:
             self.losing_trades += 1
+
+        # 更新风控状态
+        if self.risk_manager is not None:
+            self.risk_manager.record_trade(trade.pnl)
+            self.risk_manager.update_equity(self.capital)
 
         # 发送事件
         self.event_bus.emit_new(

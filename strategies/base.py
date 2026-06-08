@@ -5,7 +5,7 @@
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Any, Type, Callable
+from typing import Dict, List, Optional, Any, Type, Callable, Union
 from dataclasses import dataclass
 import pandas as pd
 from datetime import datetime
@@ -52,7 +52,7 @@ class BaseStrategy(ABC):
         df: pd.DataFrame,
         current_idx: int,
         **kwargs
-    ) -> Optional[TradeSignal]:
+    ) -> Union[TradeSignal, List[TradeSignal], None]:
         """
         生成交易信号
 
@@ -62,7 +62,7 @@ class BaseStrategy(ABC):
             **kwargs: 额外上下文信息
 
         Returns:
-            TradeSignal对象或None（无信号）
+            TradeSignal对象、TradeSignal列表或None（无信号）
         """
         pass
 
@@ -156,7 +156,9 @@ class BaseStrategy(ABC):
         reason: str = "",
         signal_bar_idx: int = 0,
         execution_bar_idx: int = 0,
-        **metadata
+        size: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **extra_metadata,
     ) -> TradeSignal:
         """
         创建交易信号
@@ -182,6 +184,14 @@ class BaseStrategy(ABC):
         else:
             signal_type = SignalType.NONE
 
+        # Handle default values
+        if metadata is None:
+            metadata = {}
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        if size is None:
+            size = metadata.get('size', self.params.get('position_size', 1.0)) if metadata else self.params.get('position_size', 1.0)
+
         signal = TradeSignal(
             timestamp=timestamp,
             signal_type=signal_type,
@@ -190,7 +200,7 @@ class BaseStrategy(ABC):
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            size=metadata.get('size', self.params.get('position_size', 1.0)),
+            size=size,
             risk_per_trade=self.params.get('risk_per_trade', 0.01),
             reason=reason,
             metadata=metadata,
@@ -283,7 +293,9 @@ class StrategyRegistry:
                 'param_bounds': temp_instance.get_param_bounds(),
                 'doc': strategy_class.__doc__
             }
-        except:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to get strategy info for {name}: {e}")
             return {
                 'name': name,
                 'class': strategy_class.__name__,

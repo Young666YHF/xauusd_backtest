@@ -1,0 +1,234 @@
+// XAUUSD Breakout Grid Strategy - v3.0 (Unlimited Grid)
+// 突破网格策略 - 无限网格版
+// 逻辑：价格突破任意网格线时市价入场，所有网格都监控
+
+//@version=6
+strategy("XAUUSD Breakout Grid", overlay=true,
+         initial_capital=100000,
+         default_qty_type=strategy.fixed,
+         default_qty_value=1,
+         slippage=3,
+         max_lines_count=500,
+         max_labels_count=500)
+
+// ============================================
+// 输入参数
+// ============================================
+gridSpacing = input.float(5.0, "网格间隔 (美元)", minval=1.0, group="网格参数")
+initialPosition = input.float(0.01, "初始仓位 (手)", minval=0.01, step=0.01, group="网格参数")
+takeProfitDistance = input.float(5.0, "止盈距离 (美元)", minval=1.0, group="网格参数")
+maxLotMultiplier = input.float(10.0, "最大手数倍数", minval=1.0, group="网格参数")
+
+// ============================================
+// 常量
+// ============================================
+MAX_LEVELS = 2001
+
+// ============================================
+// 全局变量（数组）
+// ============================================
+var gridPrices = array.new<float>(MAX_LEVELS, 0.0)
+var gridLongPos = array.new<float>(MAX_LEVELS, 0.0)
+var gridShortPos = array.new<float>(MAX_LEVELS, 0.0)
+var gridLongEntry = array.new<float>(MAX_LEVELS, 0.0)
+var gridShortEntry = array.new<float>(MAX_LEVELS, 0.0)
+var tpSetLong = array.new<bool>(MAX_LEVELS, false)
+var tpSetShort = array.new<bool>(MAX_LEVELS, false)
+
+var totalLong = 0.0
+var totalShort = 0.0
+var isInit = false
+var initLevel = -1
+
+// ============================================
+// 初始化
+// ============================================
+if bar_index == 0
+    for i = 0 to MAX_LEVELS - 1
+        array.set(gridPrices, i, i * gridSpacing)
+
+// ============================================
+// 辅助函数
+// ============================================
+priceToLevel(float price) =>
+    int(math.floor(price / gridSpacing))
+
+calcLotSizes() =>
+    float maxLot = initialPosition * maxLotMultiplier
+    float longSize = initialPosition
+    float shortSize = initialPosition
+
+    if totalShort > totalLong
+        longSize := totalShort - totalLong + initialPosition
+    else if totalLong > totalShort
+        shortSize := totalLong - totalShort + initialPosition
+
+    longSize := math.min(longSize, maxLot)
+    shortSize := math.min(shortSize, maxLot)
+    [longSize, shortSize]
+
+// ============================================
+// 开仓函数
+// ============================================
+openLong(int level, float size) =>
+    float price = close
+    float tp = price + takeProfitDistance
+    string id = "Long_L" + str.tostring(level)
+
+    strategy.entry(id, strategy.long, qty=size, comment="多_" + str.tostring(level))
+    strategy.exit("TP_" + id, id, limit=tp)
+
+    array.set(gridLongPos, level, size)
+    array.set(gridLongEntry, level, price)
+    array.set(tpSetLong, level, true)
+    totalLong := totalLong + size
+
+totalLong
+
+openShort(int level, float size) =>
+    float price = close
+    float tp = price - takeProfitDistance
+    string id = "Short_L" + str.tostring(level)
+
+    strategy.entry(id, strategy.short, qty=size, comment="空_" + str.tostring(level))
+    strategy.exit("TP_" + id, id, limit=tp)
+
+    array.set(gridShortPos, level, size)
+    array.set(gridShortEntry, level, price)
+    array.set(tpSetShort, level, true)
+    totalShort := totalShort + size
+
+totalShort
+
+// ============================================
+// 同步持仓状态
+// ============================================
+syncPositions() =>
+    float newTotalLong = 0.0
+    float newTotalShort = 0.0
+    int n = strategy.opentrades
+
+    for i = 0 to MAX_LEVELS - 1
+        array.set(gridLongPos, i, 0.0)
+        array.set(gridShortPos, i, 0.0)
+        array.set(gridLongEntry, i, 0.0)
+        array.set(gridShortEntry, i, 0.0)
+        array.set(tpSetLong, i, false)
+        array.set(tpSetShort, i, false)
+
+    if n > 0
+        for i = 0 to n - 1
+            float entryPrice = strategy.opentrades.entry_price(i)
+            float entrySize = strategy.opentrades.size(i)
+            int lvl = priceToLevel(entryPrice)
+
+            if lvl >= 0 and lvl < MAX_LEVELS
+                if entrySize > 0
+                    newTotalLong := newTotalLong + entrySize
+                    array.set(gridLongPos, lvl, entrySize)
+                    array.set(gridLongEntry, lvl, entryPrice)
+                    array.set(tpSetLong, lvl, true)
+                else
+                    newTotalShort := newTotalShort + math.abs(entrySize)
+                    array.set(gridShortPos, lvl, math.abs(entrySize))
+                    array.set(gridShortEntry, lvl, entryPrice)
+                    array.set(tpSetShort, lvl, true)
+
+    [newTotalLong, newTotalShort]
+
+// ============================================
+// 检查网格穿越
+// ============================================
+checkCrossings(float prevHigh, float prevLow, float currHigh, float currLow) =>
+    [longSize, shortSize] = calcLotSizes()
+
+    float minPrice = math.min(prevLow, currLow)
+    float maxPrice = math.max(prevHigh, currHigh)
+    int minLvl = priceToLevel(minPrice)
+    int maxLvl = priceToLevel(maxPrice) + 1
+    minLvl := math.max(0, minLvl)
+    maxLvl := math.min(MAX_LEVELS - 1, maxLvl)
+
+    for lvl = minLvl to maxLvl
+        float gridPrice = array.get(gridPrices, lvl)
+
+        float longPos = array.get(gridLongPos, lvl)
+        if longPos == 0 and prevHigh < gridPrice and currHigh >= gridPrice
+            openLong(lvl, longSize)
+
+        float shortPos = array.get(gridShortPos, lvl)
+        if shortPos == 0 and prevLow > gridPrice and currLow <= gridPrice
+            openShort(lvl, shortSize)
+
+// ============================================
+// 初始化策略
+// ============================================
+initStrategy(float price, int level) =>
+    float gridPrice = array.get(gridPrices, level)
+
+    if price >= gridPrice
+        openLong(level, initialPosition)
+    else
+        openShort(level, initialPosition)
+
+    initLevel := level
+    isInit := true
+
+// ============================================
+// 主逻辑
+// ============================================
+[newTotalLong, newTotalShort] = syncPositions()
+totalLong := newTotalLong
+totalShort := newTotalShort
+
+currLevel = priceToLevel(close)
+currLevel := math.max(0, math.min(currLevel, MAX_LEVELS - 1))
+
+if not isInit and bar_index > 0
+    initStrategy(close, currLevel)
+    initLevel := currLevel
+else if isInit
+    float prevH = high[1]
+    float prevL = low[1]
+    float currH = high
+    float currL = low
+
+    checkCrossings(prevH, prevL, currH, currL)
+
+// ============================================
+// 绘图
+// ============================================
+if isInit
+    float centerPrice = array.get(gridPrices, currLevel)
+    line.new(bar_index - 1, centerPrice, bar_index, centerPrice, color=color.gray, style=line.style_dotted)
+
+    for i = 1 to 5
+        int upLvl = math.min(MAX_LEVELS - 1, currLevel + i)
+        int dnLvl = math.max(0, currLevel - i)
+        line.new(bar_index - 1, array.get(gridPrices, upLvl), bar_index, array.get(gridPrices, upLvl), color=color.new(color.green, 50))
+        line.new(bar_index - 1, array.get(gridPrices, dnLvl), bar_index, array.get(gridPrices, dnLvl), color=color.new(color.red, 50))
+
+// ============================================
+// 信息面板
+// ============================================
+var table info = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    table.cell(info, 0, 0, "网格", text_color=color.white)
+    table.cell(info, 0, 1, "价格", text_color=color.white)
+    table.cell(info, 0, 2, "多单", text_color=color.white)
+    table.cell(info, 0, 3, "空单", text_color=color.white)
+    table.cell(info, 0, 4, "净持仓", text_color=color.white)
+    table.cell(info, 0, 5, "持仓数", text_color=color.white)
+
+    float net = totalLong - totalShort
+    color longCol = totalLong > 0 ? color.green : color.gray
+    color shortCol = totalShort > 0 ? color.red : color.gray
+    color netCol = net > 0 ? color.green : (net < 0 ? color.red : color.gray)
+
+    table.cell(info, 1, 0, str.tostring(currLevel), text_color=color.white)
+    table.cell(info, 1, 1, str.tostring(close, "#.##"), text_color=color.yellow)
+    table.cell(info, 1, 2, str.tostring(totalLong, "#.##"), text_color=longCol)
+    table.cell(info, 1, 3, str.tostring(totalShort, "#.##"), text_color=shortCol)
+    table.cell(info, 1, 4, str.tostring(net, "#.##"), text_color=netCol)
+    table.cell(info, 1, 5, str.tostring(strategy.opentrades), text_color=color.white)

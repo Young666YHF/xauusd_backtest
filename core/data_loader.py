@@ -171,14 +171,15 @@ class DataLoader:
 
         if kline_filepath.exists():
             df = pd.read_csv(kline_filepath)
-            if 'timestamp' in df.columns:
+            # 标准化列名（先处理，避免大小写敏感问题）
+            df.columns = [c.strip().capitalize() for c in df.columns]
+
+            if 'Timestamp' in df.columns:
                 # 毫秒级时间戳转换
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-                df.set_index('timestamp', inplace=True)
-            elif df.columns[0] == 'timestamp' or df.columns[0].lower() == 'timestamp':
+                df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms', utc=True)
+                df.set_index('Timestamp', inplace=True)
+            elif df.columns[0].lower() == 'timestamp':
                 df = pd.read_csv(kline_filepath, index_col=0, parse_dates=True)
-            # 标准化列名
-            df.columns = [c.capitalize() for c in df.columns]
             if df.index.tz is None:
                 df.index = df.index.tz_localize('UTC')
             return df

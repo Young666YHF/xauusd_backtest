@@ -5,6 +5,7 @@
 """
 
 from .base import BaseStrategy, StrategyRegistry
+from .dollar_trader_base import DollarTraderBaseStrategy, calculate_dollar_trader_base_indicators
 from .mean_reversion import MeanReversionStrategy
 from .momentum_breakout import MomentumBreakoutStrategy
 from .trend_angle_breakout import TrendAngleBreakoutStrategy
@@ -21,6 +22,7 @@ from .breakout_grid import BreakoutGridStrategy
 __all__ = [
     'BaseStrategy',
     'StrategyRegistry',
+    'DollarTraderBaseStrategy',
     'MeanReversionStrategy',
     'MomentumBreakoutStrategy',
     'TrendAngleBreakoutStrategy',
@@ -32,6 +34,7 @@ __all__ = [
     'MeanReversionMartingaleStrategy',
     'SmartAdaptiveMartingaleStrategy',
     'BreakoutGridStrategy',
+    'calculate_dollar_trader_base_indicators',
     'calculate_dollar_trader_martingale_sl_indicators',
     'calculate_adaptive_trend_indicators',
     'calculate_mean_reversion_indicators',

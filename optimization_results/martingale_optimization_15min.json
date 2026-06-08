@@ -1,0 +1,54 @@
+{
+  "interval": "15min",
+  "train_period": "2017-01-01 ~ 2022-12-31",
+  "test_period": "2023-01-01 ~ 2026-02-28",
+  "optimization": {
+    "best_params": {
+      "sma_short": 14,
+      "sma_medium": 56,
+      "sma_long": 137,
+      "martingale_multiplier": 2.6747751096268755,
+      "max_martingale_steps": 6,
+      "bb_period": 17,
+      "bb_std": 2.0147556840429166,
+      "bbw_ma_period": 72
+    },
+    "best_fitness": -10000000000.0,
+    "total_trials": 30,
+    "duration_seconds": 1856.754909
+  },
+  "train_results": {
+    "total_trades": 2672,
+    "winning_trades": 952,
+    "losing_trades": 1720,
+    "win_rate": 0.3562874251497006,
+    "total_pnl": -101139.09098237136,
+    "total_return": -1.0113909098237135,
+    "avg_pnl": -37.85145620597731,
+    "avg_win": 38.587235329483754,
+    "avg_loss": -80.15938314885989,
+    "profit_factor": 0.26643900223663497,
+    "max_drawdown": 101441.9360033845,
+    "max_drawdown_pct": -1.014419360033845,
+    "sharpe_ratio": 0.3069955454509601,
+    "sortino_ratio": 0.41417381233089867,
+    "calmar_ratio": NaN
+  },
+  "test_results": {
+    "total_trades": 1437,
+    "winning_trades": 589,
+    "losing_trades": 848,
+    "win_rate": 0.40988169798190677,
+    "total_pnl": -96908.77773564906,
+    "total_return": -0.9690877773564905,
+    "avg_pnl": -67.43825868869106,
+    "avg_win": 226.65049047354574,
+    "avg_loss": -271.7050903591595,
+    "profit_factor": 0.579399786449252,
+    "max_drawdown": 96954.85239386332,
+    "max_drawdown_pct": -0.9695485239386331,
+    "sharpe_ratio": -1.4209653321448428,
+    "sortino_ratio": -0.4795484942962846,
+    "calmar_ratio": -0.44413160304365557
+  }
+}

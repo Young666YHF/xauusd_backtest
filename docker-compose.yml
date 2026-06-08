@@ -1,0 +1,299 @@
+# =============================================================================
+# XAUUSD Quantitative Trading System - Docker Compose
+# Supports dev / test / prod profiles
+# =============================================================================
+
+version: "3.9"
+
+# =============================================================================
+# Common Variables
+# =============================================================================
+x-common-backtest: &common-backtest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  volumes:
+    - xauusd_data:/data:ro
+    - xauusd_results:/app/results
+    - xauusd_logs:/app/logs
+  environment:
+    - DATA_DIR=/data
+    - PYTHONPATH=/app
+  networks:
+    - xauusd-network
+  restart: unless-stopped
+
+x-common-data: &common-data
+  build:
+    context: ../xauusd_data
+    dockerfile: Dockerfile
+  volumes:
+    - xauusd_data:/data
+    - xauusd_logs:/app/logs
+  networks:
+    - xauusd-network
+  restart: unless-stopped
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+  # ===========================================================================
+  # Development Profile
+  # ===========================================================================
+  backtest-dev:
+    <<: *common-backtest
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app:rw
+      - xauusd_data:/data:ro
+      - /app/__pycache__
+      - /app/.numba_cache
+    environment:
+      - APP_ENV=development
+      - LOG_LEVEL=debug
+      - NUMBA_CACHE_DIR=/app/.numba_cache
+    command: uvicorn web.backend.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  data-dev:
+    <<: *common-data
+    profiles: ["dev"]
+    build:
+      context: ../xauusd_data
+      dockerfile: Dockerfile
+      target: development
+    volumes:
+      - ../xauusd_data:/app:rw
+      - xauusd_data:/data:rw
+    environment:
+      - APP_ENV=development
+      - LOG_LEVEL=debug
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+  # ===========================================================================
+  # Test Profile
+  # ===========================================================================
+  backtest-test:
+    <<: *common-backtest
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      - APP_ENV=test
+      - LOG_LEVEL=info
+      - PYTEST_CURRENT_TEST=1
+    command: >
+      sh -c "pytest tests/ -v --tb=short --cov=core --cov=strategies
+      --cov=engines --cov-report=xml --cov-report=term-missing
+      && bandit -r core/ strategies/ engines/ -f json -o /app/logs/bandit.json
+      && black --check core/ strategies/ engines/ web/"
+    healthcheck:
+      disable: true
+    restart: "no"
+
+  data-test:
+    <<: *common-data
+    profiles: ["test"]
+    build:
+      context: ../xauusd_data
+      dockerfile: Dockerfile
+      target: validator
+    environment:
+      - APP_ENV=test
+    command: python3 verify_all_1m_data.py
+    restart: "no"
+
+  # ===========================================================================
+  # Production Profile
+  # ===========================================================================
+  backtest-prod:
+    <<: *common-backtest
+    profiles: ["prod"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    ports:
+      - "${BACKTEST_PORT:-8000}:8000"
+    environment:
+      - APP_ENV=production
+      - LOG_LEVEL=warning
+      - WORKERS=${UVICORN_WORKERS:-4}
+    command: >
+      uvicorn web.backend.main:app
+      --host 0.0.0.0
+      --port 8000
+      --workers ${UVICORN_WORKERS:-4}
+      --proxy-headers
+      --forwarded-allow-ips '*'
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8G
+        reservations:
+          cpus: "2.0"
+          memory: 4G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  data-prod:
+    <<: *common-data
+    profiles: ["prod"]
+    build:
+      context: ../xauusd_data
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      - APP_ENV=production
+      - CRON_SCHEDULE=0 2 * * *
+    command: >
+      sh -c "echo 'Data service ready. Mount data volume and run scripts manually.'
+      && tail -f /dev/null"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+
+  # ===========================================================================
+  # Monitoring (Production Only)
+  # ===========================================================================
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    profiles: ["prod"]
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - xauusd-network
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    profiles: ["prod"]
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - xauusd-network
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    profiles: ["prod"]
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.rootfs=/rootfs"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    networks:
+      - xauusd-network
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    profiles: ["prod"]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - xauusd-network
+    restart: unless-stopped
+
+  # ===========================================================================
+  # Log Aggregation (Production Only)
+  # ===========================================================================
+  loki:
+    image: grafana/loki:2.9.0
+    profiles: ["prod"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./docker/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    networks:
+      - xauusd-network
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    profiles: ["prod"]
+    volumes:
+      - xauusd_logs:/var/log/xauusd:ro
+      - ./docker/promtail.yml:/etc/promtail/config.yml:ro
+    networks:
+      - xauusd-network
+    command: -config.file=/etc/promtail/config.yml
+    restart: unless-stopped
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  xauusd-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  xauusd_data:
+    driver: local
+  xauusd_results:
+    driver: local
+  xauusd_logs:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local

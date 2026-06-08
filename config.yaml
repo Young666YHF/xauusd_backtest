@@ -6,10 +6,10 @@ trading:
   symbol: "XAUUSD"
   contract_size: 100
   tick_size: 0.01
-  spread_per_ounce: 0.2
-  commission_per_lot: 3.5
+  spread_per_ounce: 0.6
+  commission_per_lot: 0.0
   initial_capital: 100000.0
-  leverage: 100
+  leverage: 1000
   margin_call_ratio: 0.5
   asian_session_start: 6
   asian_session_end: 14

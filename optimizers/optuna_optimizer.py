@@ -124,8 +124,9 @@ class OptunaOptimizer(BaseOptimizer):
             try:
                 fitness = objective_func(params)
             except Exception as e:
-                # 如果评估失败，返回很大的负数
-                return -1e10
+                # 评估失败时报告负无穷并剪枝该 trial
+                trial.report(float('-inf'), step=0)
+                raise optuna.TrialPruned() from e
 
             # 早停检查
             if self.early_stopping:

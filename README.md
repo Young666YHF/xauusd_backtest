@@ -69,8 +69,8 @@ xauusd_backtest/
 5. **创建专用引擎**（如需）：`engines/{strategy_name}_engine.py`
 
 **后续工作规范**：
-- 涉及策略相关工作时，**先读取说明文档**
-- 策略更新时，**同步更新说明文档**
+- 涉及策略相关工作时，**先读取策略说明文档**
+- 策略更新时，**同步更新策略说明文档**
 - 说明文档应包含：参数、逻辑、使用示例、注意事项
 
 ## 引擎
@@ -98,3 +98,14 @@ python run_optimization.py --strategy mean_reversion --n-trials 300
 
 Python 策略修改后，同步更新 `mt4/` 和 `pine/`。
 系统修改后，检查 `web/` 是否需同步。
+
+### 当前平台文件对应关系
+
+| 策略 | Python | MT4 EA | Pine Script |
+|------|--------|--------|-------------|
+| BreakoutGrid | `strategies/breakout_grid.py` | `mt4/Breakout_Grid.mq4` | `pine/breakout_grid.pine` |
+| DollarTraderMartingale | `strategies/dollar_trader_martingale.py` | `mt4/DollarTrader_Martingale.mq4` | `pine/dollar_trader_martingale.pine` |
+| DollarTraderMartingaleADX | `strategies/dollar_trader_martingale_adx.py` | `mt4/DollarTrader_Martingale_ADX.mq4` | `pine/dollar_trader_martingale_adx.pine` |
+| MeanReversion | `strategies/mean_reversion.py` | - | `pine/mean_reversion.pine` |
+| MomentumBreakout | `strategies/momentum_breakout.py` | - | `pine/momentum_breakout.pine` |
+| DollarTrader | `strategies/dollar_trader.py` | `mt4/XAUUSD_DollarTrader.mq4` | `pine/dollar_trader.pine` |

@@ -25,15 +25,21 @@ class CandleBacktestEngine(BaseBacktestEngine):
     - 精确的滑点模型
     """
 
+    # 类常量
+    DEFAULT_MAX_BARS = 10  # 默认最大持仓K线数
+
     def __init__(
         self,
         config: TradingConfig,
-        execution_model: Optional[ExecutionModel] = None
+        execution_model: Optional[ExecutionModel] = None,
+        max_bars: Optional[int] = None,
+        risk_manager=None
     ):
-        super().__init__(config, execution_model)
+        super().__init__(config, execution_model, risk_manager)
 
         # 信号队列
         self._pending_signals: Dict[int, TradeSignal] = {}
+        self.max_bars = max_bars or self.DEFAULT_MAX_BARS
 
     def run(
         self,
@@ -97,8 +103,7 @@ class CandleBacktestEngine(BaseBacktestEngine):
         pos.bars_held = self._current_bar_idx - pos.entry_bar_index
 
         # 检查最大持仓时间
-        max_bars = 10  # 默认最大持仓K线数
-        if pos.bars_held >= max_bars:
+        if pos.bars_held >= self.max_bars:
             self._close_position(
                 bar['Close'],
                 ExitReason.TIME_STOP,
@@ -187,7 +192,8 @@ class CandleBacktestEngine(BaseBacktestEngine):
         self,
         df: pd.DataFrame,
         strategy,
-        warmup_bars: int = 100
+        warmup_bars: int = 100,
+        tick_df=None
     ) -> BacktestResult:
         """
         使用策略对象运行回测
@@ -204,8 +210,12 @@ class CandleBacktestEngine(BaseBacktestEngine):
 
         # 生成信号
         for i in range(warmup_bars, len(df)):
-            signal = strategy.generate_signal(df, i)
-            if signal:
-                signals.append(signal)
+            result = strategy.generate_signal(df, i)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                signals.extend(result)
+            else:
+                signals.append(result)
 
         return self.run(df, signals)

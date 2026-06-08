@@ -129,9 +129,10 @@ class TickBacktestEngine(BaseBacktestEngine):
     def __init__(
         self,
         config: TradingConfig,
-        execution_model: Optional[ExecutionModel] = None
+        execution_model: Optional[ExecutionModel] = None,
+        risk_manager=None
     ):
-        super().__init__(config, execution_model)
+        super().__init__(config, execution_model, risk_manager)
         # 强制使用Numba，Numba不可用时报错
         if not NUMBA_AVAILABLE:
             raise RuntimeError(

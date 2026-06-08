@@ -131,7 +131,7 @@ class MeanReversionStrategy(BaseStrategy):
                     reason="MeanReversion_Long: RSI_Oversold+Bollinger_Lower",
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
-                    max_hold_bars=self.max_hold_bars_a,
+                    max_hold_bars=self.max_hold_bars,
                     vwap=vwap
                 )
 
@@ -158,7 +158,7 @@ class MeanReversionStrategy(BaseStrategy):
                     reason="MeanReversion_Short: RSI_Overbought+Bollinger_Upper",
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
-                    max_hold_bars=self.max_hold_bars_a,
+                    max_hold_bars=self.max_hold_bars,
                     vwap=vwap
                 )
 

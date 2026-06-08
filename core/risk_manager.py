@@ -38,17 +38,21 @@ class RiskManager:
 
     def __init__(
         self,
+        config=None,
         max_position_size: float = 1.0,
         max_daily_loss_pct: float = 0.02,
         max_drawdown_pct: float = 0.15,
         max_leverage: float = 100.0,
-        risk_per_trade_pct: float = 0.01
+        risk_per_trade_pct: float = 0.01,
+        max_consecutive_losses: int = 5
     ):
-        self.max_position_size = max_position_size
-        self.max_daily_loss_pct = max_daily_loss_pct
-        self.max_drawdown_pct = max_drawdown_pct
-        self.max_leverage = max_leverage
-        self.risk_per_trade_pct = risk_per_trade_pct
+        src = config if config is not None else {}
+        self.max_position_size = getattr(src, 'max_position_size', max_position_size)
+        self.max_daily_loss_pct = getattr(src, 'max_daily_loss_pct', max_daily_loss_pct)
+        self.max_drawdown_pct = getattr(src, 'max_drawdown_pct', max_drawdown_pct)
+        self.max_leverage = getattr(src, 'max_leverage', max_leverage)
+        self.risk_per_trade_pct = getattr(src, 'risk_per_trade_pct', risk_per_trade_pct)
+        self.max_consecutive_losses = getattr(src, 'max_consecutive_losses', max_consecutive_losses)
 
         # 状态追踪
         self.daily_pnl: float = 0.0
@@ -90,7 +94,7 @@ class RiskManager:
             return False, f"Max drawdown limit reached: {self.current_drawdown:.2%}"
 
         # 检查连续亏损
-        if self.consecutive_losses >= 5:
+        if self.consecutive_losses >= self.max_consecutive_losses:
             return False, f"Too many consecutive losses: {self.consecutive_losses}"
 
         return True, "OK"
@@ -254,7 +258,7 @@ class RiskManager:
         elif max_dd < -0.10:
             risk_score += 1
 
-        if self.consecutive_losses >= 5:
+        if self.consecutive_losses >= self.max_consecutive_losses:
             risk_score += 1
 
         # 确定风险等级

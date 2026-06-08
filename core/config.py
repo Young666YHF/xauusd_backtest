@@ -12,7 +12,13 @@ import yaml
 
 
 class TradingConfig(BaseModel):
-    """交易配置"""
+    """交易配置
+
+    配置来源优先级（从高到低）：
+    1. 环境变量（如 DATA_DIR, LEVERAGE）
+    2. config.yaml 配置文件
+    3. 代码默认值（本类中定义）
+    """
     # 品种配置
     symbol: str = Field(default="XAUUSD", description="交易品种代码")
     contract_size: int = Field(default=100, description="合约大小（盎司/手）")
