@@ -215,7 +215,10 @@ def calculate_keltner_channels(
 
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """
-    计算相对强弱指标 (RSI)
+    计算相对强弱指标 (RSI) - 使用 Wilder 平滑（RMA）
+
+    标准 RSI 采用 Wilder 的平滑移动平均（alpha = 1/period），
+    而非简单移动平均，以确保与主流图表软件一致。
 
     Args:
         series: 价格序列
@@ -227,11 +230,15 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
 
     # 分离上涨和下跌
-    gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=period).mean()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+
+    # 使用 Wilder 平滑（RMA）：alpha = 1 / period
+    avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
 
     # 计算RS和RSI
-    rs = gain / loss
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
 
     return rsi

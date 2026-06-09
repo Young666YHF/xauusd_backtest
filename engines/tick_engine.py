@@ -130,7 +130,8 @@ class TickBacktestEngine(BaseBacktestEngine):
         self,
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None,
-        risk_manager=None
+        risk_manager=None,
+        max_bars: Optional[int] = None
     ):
         super().__init__(config, execution_model, risk_manager)
         # 强制使用Numba，Numba不可用时报错
@@ -139,6 +140,9 @@ class TickBacktestEngine(BaseBacktestEngine):
                 "Numba is required for TickBacktestEngine. "
                 "Please install: pip install numba"
             )
+
+        # 最大持仓K线数（从策略参数传入，默认10）
+        self.max_bars = max_bars or 10
 
         # Tick数据
         self.tick_df: Optional[pd.DataFrame] = None
@@ -287,7 +291,7 @@ class TickBacktestEngine(BaseBacktestEngine):
             pos.take_profit if pos.take_profit else 0.0,
             pos.entry_price,
             pos.entry_bar_index,
-            10,  # max_bars
+            self.max_bars,
             bar_idx
         )
 
@@ -303,7 +307,7 @@ class TickBacktestEngine(BaseBacktestEngine):
             return
 
         # 检查时间止损（在K线结束时）
-        if pos.bars_held >= 10:
+        if pos.bars_held >= self.max_bars:
             slippage = self._calculate_exit_slippage(bar['Close'], atr, ExitReason.TIME_STOP)
             self._close_position(bar['Close'], ExitReason.TIME_STOP, slippage)
             return
@@ -452,8 +456,12 @@ class TickBacktestEngine(BaseBacktestEngine):
         signals = []
 
         for i in range(warmup_bars, len(df)):
-            signal = strategy.generate_signal(df, i)
-            if signal:
-                signals.append(signal)
+            result = strategy.generate_signal(df, i)
+            if result is None:
+                continue
+            if isinstance(result, list):
+                signals.extend(result)
+            else:
+                signals.append(result)
 
         return self.run(df, signals, tick_df)

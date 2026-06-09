@@ -39,7 +39,7 @@ class CandleBacktestEngine(BaseBacktestEngine):
 
         # 信号队列
         self._pending_signals: Dict[int, TradeSignal] = {}
-        self.max_bars = max_bars or self.DEFAULT_MAX_BARS
+        self.max_bars = max_bars if max_bars is not None else self.DEFAULT_MAX_BARS
 
     def run(
         self,

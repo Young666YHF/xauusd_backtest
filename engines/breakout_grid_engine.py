@@ -366,6 +366,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
             'entry_price': entry_price,
             'take_profit': take_profit,
             'entry_time': timestamp,
+            'entry_bar_index': self._current_bar_idx,
         }
 
         # 更新统计
@@ -417,7 +418,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
             pnl_pct=pnl_points / entry_price if entry_price != 0 else 0,
             strategy_id="BreakoutGrid",
             exit_reason=exit_reason,
-            bars_held=self._current_bar_idx - 0,  # 简化处理
+            bars_held=self._current_bar_idx - pos.get('entry_bar_index', self._current_bar_idx),
             entry_slippage=0.0,
             exit_slippage=0.0,
             commission=spread_cost,
