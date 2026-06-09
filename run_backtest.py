@@ -98,8 +98,10 @@ def load_data(config: Config, args) -> pd.DataFrame:
     print(f"Loading data for {len(months)} months...")
     df = loader.load_range(months, config.data.interval)
 
-    # 过滤日期范围
-    df = df[(df.index >= args.start_date) & (df.index <= args.end_date)]
+    # 过滤日期范围（统一为UTC时区比较）
+    start_ts = pd.Timestamp(args.start_date, tz='UTC')
+    end_ts = pd.Timestamp(args.end_date + ' 23:59:59', tz='UTC')
+    df = df[(df.index >= start_ts) & (df.index <= end_ts)]
 
     print(f"Loaded {len(df)} bars")
     return df
@@ -130,7 +132,7 @@ def add_indicators(df: pd.DataFrame, config: Config, strategy) -> pd.DataFrame:
     return df
 
 
-def create_engine(config: Config, args):
+def create_engine(config: Config, args, strategy):
     """创建回测引擎"""
     from core.config import TradingConfig
 
@@ -139,10 +141,17 @@ def create_engine(config: Config, args):
     # 创建风控管理器
     risk_manager = RiskManager(config=trading_config)
 
+    # 从策略参数读取最大持仓K线数
+    max_bars = None
+    if hasattr(strategy, 'max_hold_bars'):
+        max_bars = strategy.max_hold_bars
+    elif hasattr(strategy, 'params'):
+        max_bars = strategy.params.get('max_hold_bars_a') or strategy.params.get('max_hold_bars_b')
+
     if args.engine == 'tick':
-        return TickBacktestEngine(trading_config, risk_manager=risk_manager)
+        return TickBacktestEngine(trading_config, risk_manager=risk_manager, max_bars=max_bars)
     else:
-        return CandleBacktestEngine(trading_config, risk_manager=risk_manager)
+        return CandleBacktestEngine(trading_config, risk_manager=risk_manager, max_bars=max_bars)
 
 
 def run_backtest(args):
@@ -171,8 +180,8 @@ def run_backtest(args):
     print(f"\nStrategy: {strategy.strategy_id}")
     print(f"Parameters: {strategy_params}\n")
 
-    # 创建引擎
-    engine = create_engine(config, args)
+    # 创建引擎（传入策略以读取max_bars等参数）
+    engine = create_engine(config, args, strategy)
     print(f"Engine: {args.engine}\n")
 
     # 加载Tick数据（如果需要）
