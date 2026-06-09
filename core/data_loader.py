@@ -184,15 +184,23 @@ class DataLoader:
                 df.index = df.index.tz_localize('UTC')
             return df
 
-        # 再尝试tick格式
-        tick_filename = f"XAUUSD_{year}-{month:02d}.csv"
-        tick_filepath = self.data_dir / tick_filename
+        # 再尝试tick格式（新命名规范）
+        tick_filename = f"XAUUSD_BID_tick_{year}{month:02d}.csv"
+        tick_filepath = self.data_dir / "tick" / str(year) / tick_filename
 
         if tick_filepath.exists():
             tick_df = self.load_tick_data(tick_filepath)
             return self.resample_to_ohlcv(tick_df, interval)
 
-        raise FileNotFoundError(f"数据文件不存在: {kline_filepath} 或 {tick_filepath}")
+        # 再尝试tick格式（旧命名规范，向后兼容）
+        tick_filename_legacy = f"XAUUSD_{year}-{month:02d}.csv"
+        tick_filepath_legacy = self.data_dir / "tick" / str(year) / tick_filename_legacy
+
+        if tick_filepath_legacy.exists():
+            tick_df = self.load_tick_data(tick_filepath_legacy)
+            return self.resample_to_ohlcv(tick_df, interval)
+
+        raise FileNotFoundError(f"数据文件不存在: {kline_filepath} 或 {tick_filepath} 或 {tick_filepath_legacy}")
 
     def load_range(
         self,

@@ -645,6 +645,23 @@ class DollarTraderBaseStrategy(BaseStrategy):
         super().reset()
         self.current_position = None
 
+    def prepare_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        为 Dollar Trader 策略准备 SMA 指标。
+
+        Args:
+            df: 原始OHLCV数据
+
+        Returns:
+            添加 SMA 指标后的 DataFrame
+        """
+        return calculate_dollar_trader_base_indicators(
+            df,
+            sma_short=self.params.get('sma_short', 20),
+            sma_medium=self.params.get('sma_medium', 50),
+            sma_long=self.params.get('sma_long', 200),
+        )
+
 
 def calculate_dollar_trader_base_indicators(
     df: pd.DataFrame,

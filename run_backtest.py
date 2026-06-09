@@ -105,12 +105,12 @@ def load_data(config: Config, args) -> pd.DataFrame:
     return df
 
 
-def add_indicators(df: pd.DataFrame, config: Config) -> pd.DataFrame:
+def add_indicators(df: pd.DataFrame, config: Config, strategy) -> pd.DataFrame:
     """添加技术指标"""
     print("Calculating indicators...")
 
+    # 先添加通用指标
     params = config.strategy.to_dict()
-
     df = add_all_indicators(
         df,
         bb_period=params.get('bb_period', 20),
@@ -123,6 +123,9 @@ def add_indicators(df: pd.DataFrame, config: Config) -> pd.DataFrame:
         ema_slow=params.get('ema_slow', 50),
         vwap_reset_hour=config.data.vwap_reset_hour_et
     )
+
+    # 再调用策略特有的指标准备
+    df = strategy.prepare_indicators(df)
 
     return df
 
@@ -154,10 +157,7 @@ def run_backtest(args):
     # 加载数据
     df = load_data(config, args)
 
-    # 添加指标
-    df = add_indicators(df, config)
-
-    # 创建策略
+    # 创建策略（先创建策略实例，以便调用策略特有的指标准备方法）
     strategy_params = config.strategy.to_dict()
     if args.params:
         import json
@@ -165,6 +165,9 @@ def run_backtest(args):
         strategy_params.update(override_params)
 
     strategy = StrategyRegistry.create(args.strategy, strategy_params)
+
+    # 添加指标（使用策略的 prepare_indicators 方法）
+    df = add_indicators(df, config, strategy)
     print(f"\nStrategy: {strategy.strategy_id}")
     print(f"Parameters: {strategy_params}\n")
 

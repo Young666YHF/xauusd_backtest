@@ -118,6 +118,21 @@ class BaseStrategy(ABC):
         self.long_signals = 0
         self.short_signals = 0
 
+    def prepare_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        为策略准备指标数据。
+
+        子类可以重写此方法以计算策略特有的指标。
+        默认实现直接返回原DataFrame（假设指标已在外部计算）。
+
+        Args:
+            df: 原始OHLCV数据
+
+        Returns:
+            添加指标后的DataFrame
+        """
+        return df
+
     def on_bar_close(self, bar: MarketData):
         """
         K线关闭时的回调
