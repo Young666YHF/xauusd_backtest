@@ -17,6 +17,7 @@ from core.types import OptimizationResult
 try:
     import optuna
     from optuna.samplers import TPESampler
+
     OPTUNA_AVAILABLE = True
 except ImportError:
     OPTUNA_AVAILABLE = False
@@ -38,14 +39,13 @@ class OptunaOptimizer(BaseOptimizer):
         timeout: Optional[int] = None,
         n_jobs: int = -1,
         min_trades: int = 30,
-        optimization_target: str = 'calmar',
+        optimization_target: str = "calmar",
         early_stopping: bool = True,
         patience: int = 50,
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
     ):
         super().__init__(
-            param_bounds, n_trials, timeout, n_jobs,
-            min_trades, optimization_target
+            param_bounds, n_trials, timeout, n_jobs, min_trades, optimization_target
         )
         self.early_stopping = early_stopping
         self.patience = patience
@@ -70,25 +70,21 @@ class OptunaOptimizer(BaseOptimizer):
             # 判断参数类型
             if isinstance(min_val, int) and isinstance(max_val, int):
                 # 整数参数
-                params[param_name] = trial.suggest_int(
-                    param_name, min_val, max_val
-                )
-            elif param_name.endswith('_mode') or param_name.startswith('use_'):
+                params[param_name] = trial.suggest_int(param_name, min_val, max_val)
+            elif param_name.endswith("_mode") or param_name.startswith("use_"):
                 # 分类参数
                 choices = list(range(int(min_val), int(max_val) + 1))
                 params[param_name] = trial.suggest_categorical(param_name, choices)
             else:
                 # 浮点参数
-                params[param_name] = trial.suggest_float(
-                    param_name, min_val, max_val
-                )
+                params[param_name] = trial.suggest_float(param_name, min_val, max_val)
 
         return params
 
     def optimize(
         self,
         objective_func: Callable[[Dict[str, Any]], float],
-        callback: Optional[OptimizationCallback] = None
+        callback: Optional[OptimizationCallback] = None,
     ) -> OptimizationResult:
         """
         执行优化
@@ -106,13 +102,10 @@ class OptunaOptimizer(BaseOptimizer):
         # 创建Optuna study
         sampler = TPESampler(seed=self.seed) if self.seed else TPESampler()
 
-        study = optuna.create_study(
-            direction='maximize',
-            sampler=sampler
-        )
+        study = optuna.create_study(direction="maximize", sampler=sampler)
 
         # 早停计数器（使用线程锁保护，避免并行竞争条件）
-        best_value = -float('inf')
+        best_value = -float("inf")
         no_improvement_count = 0
         _stop_lock = Lock()
 
@@ -154,7 +147,7 @@ class OptunaOptimizer(BaseOptimizer):
             n_trials=self.n_trials,
             timeout=self.timeout,
             n_jobs=self.n_jobs,
-            show_progress_bar=True
+            show_progress_bar=True,
         )
 
         # 构建结果
@@ -168,12 +161,18 @@ class OptunaOptimizer(BaseOptimizer):
             best_params=study.best_params,
             best_fitness=study.best_value,
             total_trials=len(study.trials),
-            completed_trials=len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
-            pruned_trials=len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]),
-            failed_trials=len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]),
+            completed_trials=len(
+                [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            ),
+            pruned_trials=len(
+                [t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]
+            ),
+            failed_trials=len(
+                [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
+            ),
             start_time=start_time,
             end_time=end_time,
-            duration_seconds=duration
+            duration_seconds=duration,
         )
 
         # 回调
@@ -186,7 +185,7 @@ class OptunaOptimizer(BaseOptimizer):
         self,
         train_func: Callable[[Dict[str, Any]], Dict[str, Any]],
         test_func: Callable[[Dict[str, Any]], Dict[str, Any]],
-        callback: Optional[OptimizationCallback] = None
+        callback: Optional[OptimizationCallback] = None,
     ) -> OptimizationResult:
         """
         使用Walk-Forward验证进行优化
@@ -199,6 +198,7 @@ class OptunaOptimizer(BaseOptimizer):
         Returns:
             OptimizationResult
         """
+
         def objective(params: Dict[str, Any]) -> float:
             # 训练集评估
             train_result = train_func(params)

@@ -14,6 +14,7 @@ import threading
 
 class EventType(Enum):
     """事件类型枚举"""
+
     # 信号事件
     SIGNAL_GENERATED = auto()
     SIGNAL_EXECUTED = auto()
@@ -54,6 +55,7 @@ class EventType(Enum):
 @dataclass
 class Event:
     """事件数据结构"""
+
     event_type: EventType
     timestamp: datetime = field(default_factory=datetime.now)
     source: str = field(default="")
@@ -68,7 +70,9 @@ class EventBus:
     """事件总线 - 支持发布/订阅模式"""
 
     def __init__(self):
-        self._handlers: Dict[EventType, List[Callable[[Event], None]]] = defaultdict(list)
+        self._handlers: Dict[EventType, List[Callable[[Event], None]]] = defaultdict(
+            list
+        )
         self._global_handlers: List[Callable[[Event], None]] = []
         self._lock = threading.RLock()
         self._event_history: List[Event] = []
@@ -128,14 +132,12 @@ class EventBus:
 
     def emit_new(self, event_type: EventType, source: str = "", **data):
         """创建并发布新事件"""
-        event = Event(
-            event_type=event_type,
-            source=source,
-            data=data
-        )
+        event = Event(event_type=event_type, source=source, data=data)
         self.emit(event)
 
-    def get_history(self, event_type: Optional[EventType] = None, limit: int = 100) -> List[Event]:
+    def get_history(
+        self, event_type: Optional[EventType] = None, limit: int = 100
+    ) -> List[Event]:
         """获取事件历史"""
         with self._lock:
             events = self._event_history

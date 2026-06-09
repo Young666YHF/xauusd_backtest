@@ -58,18 +58,18 @@ class DollarTraderBaseStrategy(BaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         """返回默认参数。"""
         return {
-            'sma_short': 20,
-            'sma_medium': 50,
-            'sma_long': 200,
-            'position_size': 1.0,
+            "sma_short": 20,
+            "sma_medium": 50,
+            "sma_long": 200,
+            "position_size": 1.0,
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """返回参数优化范围。"""
         return {
-            'sma_short': (10, 30),
-            'sma_medium': (30, 70),
-            'sma_long': (100, 300),
+            "sma_short": (10, 30),
+            "sma_medium": (30, 70),
+            "sma_long": (100, 300),
         }
 
     # ------------------------------------------------------------------
@@ -90,9 +90,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
         )
 
     def _check_sma_alignment(
-        self,
-        df: pd.DataFrame,
-        current_idx: int
+        self, df: pd.DataFrame, current_idx: int
     ) -> Tuple[bool, bool, pd.Series, pd.Series]:
         """
         检查 SMA 多头排列和空头排列。
@@ -115,32 +113,28 @@ class DollarTraderBaseStrategy(BaseStrategy):
 
         sma_s_col, sma_m_col, sma_l_col = self._get_sma_column_names()
 
-        prev_close = prev_bar['Close']
+        prev_close = prev_bar["Close"]
         prev_sma_s = prev_bar[sma_s_col]
         prev_sma_m = prev_bar[sma_m_col]
         prev_sma_l = prev_bar[sma_l_col]
 
         # 多头排列: C > SMA_S > SMA_M > SMA_L
         prev_bullish = (
-            prev_close > prev_sma_s and
-            prev_sma_s > prev_sma_m and
-            prev_sma_m > prev_sma_l
+            prev_close > prev_sma_s
+            and prev_sma_s > prev_sma_m
+            and prev_sma_m > prev_sma_l
         )
 
         # 空头排列: C < SMA_S < SMA_M < SMA_L
         prev_bearish = (
-            prev_close < prev_sma_s and
-            prev_sma_s < prev_sma_m and
-            prev_sma_m < prev_sma_l
+            prev_close < prev_sma_s
+            and prev_sma_s < prev_sma_m
+            and prev_sma_m < prev_sma_l
         )
 
         return prev_bullish, prev_bearish, prev_bar, current_bar
 
-    def _check_crossover(
-        self,
-        df: pd.DataFrame,
-        current_idx: int
-    ) -> Tuple[bool, bool]:
+    def _check_crossover(self, df: pd.DataFrame, current_idx: int) -> Tuple[bool, bool]:
         """
         检测 SMA 短期与中期均线的交叉。
 
@@ -176,9 +170,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
         return sma_bearish_cross, sma_bullish_cross
 
     def _validate_data(
-        self,
-        df: pd.DataFrame,
-        current_idx: int
+        self, df: pd.DataFrame, current_idx: int
     ) -> Optional[Tuple[str, str, str]]:
         """
         验证数据充足性和指标列存在性。
@@ -191,7 +183,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
             验证通过返回 (sma_s_col, sma_m_col, sma_l_col)，
             否则返回 None。
         """
-        min_bars_needed = self.params['sma_long'] + 5
+        min_bars_needed = self.params["sma_long"] + 5
         if current_idx < min_bars_needed:
             return None
 
@@ -206,9 +198,9 @@ class DollarTraderBaseStrategy(BaseStrategy):
 
         prev_bar = df.iloc[current_idx - 1]
         if (
-            pd.isna(prev_bar[sma_s_col]) or
-            pd.isna(prev_bar[sma_m_col]) or
-            pd.isna(prev_bar[sma_l_col])
+            pd.isna(prev_bar[sma_s_col])
+            or pd.isna(prev_bar[sma_m_col])
+            or pd.isna(prev_bar[sma_l_col])
         ):
             return None
 
@@ -219,10 +211,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def _check_entry_filters(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        prev_bar: pd.Series
+        self, df: pd.DataFrame, current_idx: int, prev_bar: pd.Series
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         检查入场过滤条件。
@@ -239,11 +228,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
         """
         return True, {}
 
-    def _modify_entry_signal(
-        self,
-        signal: TradeSignal,
-        **kwargs
-    ) -> TradeSignal:
+    def _modify_entry_signal(self, signal: TradeSignal, **kwargs) -> TradeSignal:
         """
         修改入场信号。
 
@@ -258,11 +243,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
         """
         return signal
 
-    def _modify_exit_signal(
-        self,
-        signal: TradeSignal,
-        **kwargs
-    ) -> TradeSignal:
+    def _modify_exit_signal(self, signal: TradeSignal, **kwargs) -> TradeSignal:
         """
         修改出场信号。
 
@@ -293,10 +274,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        **kwargs
+        self, df: pd.DataFrame, current_idx: int, **kwargs
     ) -> Optional[TradeSignal]:
         """
         生成交易信号。
@@ -321,9 +299,9 @@ class DollarTraderBaseStrategy(BaseStrategy):
         sma_bearish_cross, sma_bullish_cross = self._check_crossover(df, current_idx)
 
         current_timestamp = df.index[current_idx]
-        current_open = current_bar['Open']
+        current_open = current_bar["Open"]
         sma_s_col, sma_m_col, sma_l_col = self._get_sma_column_names()
-        prev_close = prev_bar['Close']
+        prev_close = prev_bar["Close"]
         prev_sma_s = prev_bar[sma_s_col]
         prev_sma_m = prev_bar[sma_m_col]
         prev_sma_l = prev_bar[sma_l_col]
@@ -575,7 +553,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
         direction: TradeDirection,
         prev_sma_s: float,
         prev_sma_m: float,
-        filter_info: Dict[str, Any]
+        filter_info: Dict[str, Any],
     ) -> str:
         """
         格式化反向开仓信号的原因字符串。
@@ -633,7 +611,7 @@ class DollarTraderBaseStrategy(BaseStrategy):
         Args:
             trade_record: 交易记录
         """
-        if trade_record.get('exit_reason') in [
+        if trade_record.get("exit_reason") in [
             ExitReason.SIGNAL_REVERSE,
             ExitReason.FORCE_CLOSE,
             ExitReason.END_OF_DATA,
@@ -657,17 +635,14 @@ class DollarTraderBaseStrategy(BaseStrategy):
         """
         return calculate_dollar_trader_base_indicators(
             df,
-            sma_short=self.params.get('sma_short', 20),
-            sma_medium=self.params.get('sma_medium', 50),
-            sma_long=self.params.get('sma_long', 200),
+            sma_short=self.params.get("sma_short", 20),
+            sma_medium=self.params.get("sma_medium", 50),
+            sma_long=self.params.get("sma_long", 200),
         )
 
 
 def calculate_dollar_trader_base_indicators(
-    df: pd.DataFrame,
-    sma_short: int = 20,
-    sma_medium: int = 50,
-    sma_long: int = 200
+    df: pd.DataFrame, sma_short: int = 20, sma_medium: int = 50, sma_long: int = 200
 ) -> pd.DataFrame:
     """
     计算 Dollar Trader 基类策略所需的所有指标。
@@ -682,7 +657,7 @@ def calculate_dollar_trader_base_indicators(
         添加指标后的 DataFrame
     """
     result = df.copy()
-    result[f'SMA_{sma_short}'] = calculate_sma(result['Close'], sma_short)
-    result[f'SMA_{sma_medium}'] = calculate_sma(result['Close'], sma_medium)
-    result[f'SMA_{sma_long}'] = calculate_sma(result['Close'], sma_long)
+    result[f"SMA_{sma_short}"] = calculate_sma(result["Close"], sma_short)
+    result[f"SMA_{sma_medium}"] = calculate_sma(result["Close"], sma_medium)
+    result[f"SMA_{sma_long}"] = calculate_sma(result["Close"], sma_long)
     return result

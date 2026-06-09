@@ -5,7 +5,8 @@ Backtrader 对比验证脚本
 """
 
 import sys
-sys.path.insert(0, '/home/ctyun/xauusd_backtest')
+
+sys.path.insert(0, "/home/ctyun/xauusd_backtest")
 
 import backtrader as bt
 import pandas as pd
@@ -18,6 +19,7 @@ from collections import defaultdict
 # Backtrader 策略实现
 # ============================================
 
+
 class BBWMartingaleStrategy(bt.Strategy):
     """
     BBW 过滤 + SMA 趋势跟踪 + 阶梯式马丁格尔
@@ -26,21 +28,21 @@ class BBWMartingaleStrategy(bt.Strategy):
     """
 
     params = (
-        ('sma_short', 20),
-        ('sma_medium', 50),
-        ('sma_long', 200),
-        ('bb_period', 36),
-        ('bb_std', 2.0),
-        ('bbw_ma_period', 84),
-        ('position_size', 0.01),
-        ('martingale_multiplier', 2.0),
-        ('max_martingale_steps', 5),
-        ('enable_overshoot', True),
-        ('enable_undershoot', True),
-        ('spread_per_ounce', 0.6),
-        ('contract_size', 100),
-        ('warmup_bars', 250),
-        ('debug', False),  # 调试开关
+        ("sma_short", 20),
+        ("sma_medium", 50),
+        ("sma_long", 200),
+        ("bb_period", 36),
+        ("bb_std", 2.0),
+        ("bbw_ma_period", 84),
+        ("position_size", 0.01),
+        ("martingale_multiplier", 2.0),
+        ("max_martingale_steps", 5),
+        ("enable_overshoot", True),
+        ("enable_undershoot", True),
+        ("spread_per_ounce", 0.6),
+        ("contract_size", 100),
+        ("warmup_bars", 250),
+        ("debug", False),  # 调试开关
     )
 
     def __init__(self):
@@ -51,9 +53,7 @@ class BBWMartingaleStrategy(bt.Strategy):
 
         # 布林带
         self.bb = bt.indicators.BollingerBands(
-            self.data.close,
-            period=self.p.bb_period,
-            devfactor=self.p.bb_std
+            self.data.close, period=self.p.bb_period, devfactor=self.p.bb_std
         )
 
         # BBW = (Upper - Lower) / Middle * 100
@@ -114,13 +114,17 @@ class BBWMartingaleStrategy(bt.Strategy):
             return
 
         # 趋势判断 (基于上一根K线)
-        is_bullish = (prev_close > prev_sma_s and
-                      prev_sma_s > prev_sma_m and
-                      prev_sma_m > prev_sma_l)
+        is_bullish = (
+            prev_close > prev_sma_s
+            and prev_sma_s > prev_sma_m
+            and prev_sma_m > prev_sma_l
+        )
 
-        is_bearish = (prev_close < prev_sma_s and
-                      prev_sma_s < prev_sma_m and
-                      prev_sma_m < prev_sma_l)
+        is_bearish = (
+            prev_close < prev_sma_s
+            and prev_sma_s < prev_sma_m
+            and prev_sma_m < prev_sma_l
+        )
 
         # SMA 交叉判断
         sma_bearish_cross = (prev2_sma_s >= prev2_sma_m) and (prev_sma_s < prev_sma_m)
@@ -130,29 +134,31 @@ class BBWMartingaleStrategy(bt.Strategy):
         bbw_allow = prev_bbw > prev_bbw_ma
 
         # 计算当前仓位大小
-        current_position_size = self.p.position_size * (self.p.martingale_multiplier ** self.martingale_step)
+        current_position_size = self.p.position_size * (
+            self.p.martingale_multiplier**self.martingale_step
+        )
 
         # ============================================
         # 出场逻辑
         # ============================================
         if self.position:
-            if self.position_direction == 'long' and sma_bearish_cross:
+            if self.position_direction == "long" and sma_bearish_cross:
                 # 多头出场
                 self.close()
                 if is_bearish and bbw_allow:
                     # 反向开空
                     self.sell(size=current_position_size)
-                    self.position_direction = 'short'
+                    self.position_direction = "short"
                 else:
                     self.position_direction = None
 
-            elif self.position_direction == 'short' and sma_bullish_cross:
+            elif self.position_direction == "short" and sma_bullish_cross:
                 # 空头出场
                 self.close()
                 if is_bullish and bbw_allow:
                     # 反向开多
                     self.buy(size=current_position_size)
-                    self.position_direction = 'long'
+                    self.position_direction = "long"
                 else:
                     self.position_direction = None
 
@@ -162,11 +168,11 @@ class BBWMartingaleStrategy(bt.Strategy):
         else:
             if is_bullish and bbw_allow:
                 self.buy(size=current_position_size)
-                self.position_direction = 'long'
+                self.position_direction = "long"
 
             elif is_bearish and bbw_allow:
                 self.sell(size=current_position_size)
-                self.position_direction = 'short'
+                self.position_direction = "short"
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
@@ -207,25 +213,31 @@ class BBWMartingaleStrategy(bt.Strategy):
                         self.undershoot_count += 1
 
             # 记录交易
-            self.trades.append({
-                'entry_time': bt.num2date(trade.dtopen),
-                'exit_time': bt.num2date(trade.dtclose),
-                'direction': 'long' if trade.size > 0 else 'short',
-                'entry_price': trade.price,
-                'exit_price': trade.price + (trade.pnl / trade.size / self.p.contract_size) if abs(trade.size) > 0 else 0,
-                'size': abs(trade.size),
-                'pnl': trade.pnl,
-            })
+            self.trades.append(
+                {
+                    "entry_time": bt.num2date(trade.dtopen),
+                    "exit_time": bt.num2date(trade.dtclose),
+                    "direction": "long" if trade.size > 0 else "short",
+                    "entry_price": trade.price,
+                    "exit_price": (
+                        trade.price + (trade.pnl / trade.size / self.p.contract_size)
+                        if abs(trade.size) > 0
+                        else 0
+                    ),
+                    "size": abs(trade.size),
+                    "pnl": trade.pnl,
+                }
+            )
 
 
 class SpreadCommission(bt.CommInfoBase):
     """点差成本模型"""
 
     params = (
-        ('spread_per_ounce', 0.6),
-        ('contract_size', 100),
-        ('stocklike', False),
-        ('commtype', bt.CommInfoBase.COMM_FIXED),
+        ("spread_per_ounce", 0.6),
+        ("contract_size", 100),
+        ("stocklike", False),
+        ("commtype", bt.CommInfoBase.COMM_FIXED),
     )
 
     def _getcommission(self, size, price, pseudoexec):
@@ -242,12 +254,12 @@ def run_backtrader_backtest(df, params):
     data = bt.feeds.PandasData(
         dataname=df,
         datetime=None,  # 使用索引
-        open='Open',
-        high='High',
-        low='Low',
-        close='Close',
-        volume='Volume',
-        openinterest=-1
+        open="Open",
+        high="High",
+        low="Low",
+        close="Close",
+        volume="Volume",
+        openinterest=-1,
     )
     cerebro.adddata(data)
 
@@ -259,8 +271,8 @@ def run_backtrader_backtest(df, params):
 
     # 设置点差成本
     comminfo = SpreadCommission(
-        spread_per_ounce=params.get('spread_per_ounce', 0.6),
-        contract_size=params.get('contract_size', 100)
+        spread_per_ounce=params.get("spread_per_ounce", 0.6),
+        contract_size=params.get("contract_size", 100),
     )
     cerebro.broker.addcommissioninfo(comminfo)
 
@@ -269,14 +281,14 @@ def run_backtrader_backtest(df, params):
     strategy = results[0]
 
     return {
-        'final_value': cerebro.broker.getvalue(),
-        'trades': strategy.trades,
-        'total_trades': len(strategy.trades),
-        'martingale_step': strategy.martingale_step,
+        "final_value": cerebro.broker.getvalue(),
+        "trades": strategy.trades,
+        "total_trades": len(strategy.trades),
+        "martingale_step": strategy.martingale_step,
     }
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     from dateutil.relativedelta import relativedelta
 
     # 加载数据
@@ -284,39 +296,39 @@ if __name__ == '__main__':
     print("Backtrader vs 自定义框架 对比验证")
     print("=" * 70)
 
-    data_path = Path('/home/ctyun/xauusd_data/kline/30m')
+    data_path = Path("/home/ctyun/xauusd_data/kline/30m")
 
     # 加载 2017-10 到 2018-01 的数据
     dfs = []
-    for month in ['201710', '201711', '201712', '201801']:
-        filepath = data_path / f'XAUUSD_BID_30m_{month}.csv'
+    for month in ["201710", "201711", "201712", "201801"]:
+        filepath = data_path / f"XAUUSD_BID_30m_{month}.csv"
         if filepath.exists():
             df = pd.read_csv(filepath, index_col=0)
-            df.index = pd.to_datetime(df.index, unit='ms')
+            df.index = pd.to_datetime(df.index, unit="ms")
             df.columns = [col.capitalize() for col in df.columns]
             dfs.append(df)
 
     df = pd.concat(dfs).sort_index()
-    df = df[~df.index.duplicated(keep='first')]
+    df = df[~df.index.duplicated(keep="first")]
 
     print(f"\n数据范围: {df.index[0]} ~ {df.index[-1]}")
     print(f"K线数量: {len(df)}")
 
     # 参数设置
     params = {
-        'sma_short': 20,
-        'sma_medium': 50,
-        'sma_long': 200,
-        'bb_period': 36,
-        'bb_std': 2.0,
-        'bbw_ma_period': 84,
-        'position_size': 0.01,
-        'martingale_multiplier': 2.0,
-        'max_martingale_steps': 5,
-        'enable_overshoot': True,
-        'enable_undershoot': True,
-        'spread_per_ounce': 0.6,
-        'contract_size': 100,
+        "sma_short": 20,
+        "sma_medium": 50,
+        "sma_long": 200,
+        "bb_period": 36,
+        "bb_std": 2.0,
+        "bbw_ma_period": 84,
+        "position_size": 0.01,
+        "martingale_multiplier": 2.0,
+        "max_martingale_steps": 5,
+        "enable_overshoot": True,
+        "enable_undershoot": True,
+        "spread_per_ounce": 0.6,
+        "contract_size": 100,
     }
 
     print(f"\n策略参数:")
@@ -338,11 +350,13 @@ if __name__ == '__main__':
     print(f"  总收益率: {(bt_result['final_value'] - 100000) / 100000 * 100:.2f}%")
     print(f"  最终马丁阶梯: {bt_result['martingale_step']}")
 
-    if bt_result['trades']:
+    if bt_result["trades"]:
         print(f"\n  前5笔交易:")
-        for i, t in enumerate(bt_result['trades'][:5]):
-            print(f"    {i+1}. {t['entry_time'].strftime('%Y/%m/%d %H:%M')} | {t['direction']} | "
-                  f"入场: {t['entry_price']:.2f} | PnL: ${t['pnl']:.2f}")
+        for i, t in enumerate(bt_result["trades"][:5]):
+            print(
+                f"    {i+1}. {t['entry_time'].strftime('%Y/%m/%d %H:%M')} | {t['direction']} | "
+                f"入场: {t['entry_price']:.2f} | PnL: ${t['pnl']:.2f}"
+            )
 
     # ============================================
     # 运行自定义框架回测
@@ -353,7 +367,7 @@ if __name__ == '__main__':
 
     from strategies.dollar_trader_martingale_adx import (
         DollarTraderMartingaleBBWStepStrategy,
-        calculate_dollar_trader_martingale_bbw_indicators
+        calculate_dollar_trader_martingale_bbw_indicators,
     )
     from engines.dollar_trader_engine import DollarTraderBacktestEngine
     from core.config import TradingConfig
@@ -361,35 +375,35 @@ if __name__ == '__main__':
     # 计算指标
     df_indicators = calculate_dollar_trader_martingale_bbw_indicators(
         df.copy(),
-        sma_short=params['sma_short'],
-        sma_medium=params['sma_medium'],
-        sma_long=params['sma_long'],
-        bb_period=params['bb_period'],
-        bb_std=params['bb_std'],
-        bbw_ma_period=params['bbw_ma_period']
+        sma_short=params["sma_short"],
+        sma_medium=params["sma_medium"],
+        sma_long=params["sma_long"],
+        bb_period=params["bb_period"],
+        bb_std=params["bb_std"],
+        bbw_ma_period=params["bbw_ma_period"],
     )
 
     config = TradingConfig(
-        symbol='XAUUSD',
-        spread_per_ounce=params['spread_per_ounce'],
-        initial_capital=100000
+        symbol="XAUUSD",
+        spread_per_ounce=params["spread_per_ounce"],
+        initial_capital=100000,
     )
 
     strategy = DollarTraderMartingaleBBWStepStrategy(
         params={
-            'sma_short': params['sma_short'],
-            'sma_medium': params['sma_medium'],
-            'sma_long': params['sma_long'],
-            'position_size': params['position_size'],
-            'martingale_multiplier': params['martingale_multiplier'],
-            'max_martingale_steps': params['max_martingale_steps'],
-            'bb_period': params['bb_period'],
-            'bb_std': params['bb_std'],
-            'bbw_ma_period': params['bbw_ma_period'],
-            'enable_overshoot': params['enable_overshoot'],
-            'enable_undershoot': params['enable_undershoot'],
+            "sma_short": params["sma_short"],
+            "sma_medium": params["sma_medium"],
+            "sma_long": params["sma_long"],
+            "position_size": params["position_size"],
+            "martingale_multiplier": params["martingale_multiplier"],
+            "max_martingale_steps": params["max_martingale_steps"],
+            "bb_period": params["bb_period"],
+            "bb_std": params["bb_std"],
+            "bbw_ma_period": params["bbw_ma_period"],
+            "enable_overshoot": params["enable_overshoot"],
+            "enable_undershoot": params["enable_undershoot"],
         },
-        strategy_id="DT_BBW_Compare"
+        strategy_id="DT_BBW_Compare",
     )
 
     engine = DollarTraderBacktestEngine(config)
@@ -403,8 +417,10 @@ if __name__ == '__main__':
     if result.trades:
         print(f"\n  前5笔交易:")
         for i, t in enumerate(result.trades[:5]):
-            print(f"    {i+1}. {t.entry_time.strftime('%Y/%m/%d %H:%M')} | {t.direction.name} | "
-                  f"入场: {t.entry_price:.2f} | PnL: ${t.pnl:.2f}")
+            print(
+                f"    {i+1}. {t.entry_time.strftime('%Y/%m/%d %H:%M')} | {t.direction.name} | "
+                f"入场: {t.entry_price:.2f} | PnL: ${t.pnl:.2f}"
+            )
 
     # ============================================
     # 对比总结
@@ -414,6 +430,12 @@ if __name__ == '__main__':
     print("=" * 70)
     print(f"{'指标':<20} {'Backtrader':>15} {'自定义框架':>15} {'差异':>10}")
     print("-" * 70)
-    print(f"{'交易次数':<20} {bt_result['total_trades']:>15} {result.total_trades:>15} {bt_result['total_trades'] - result.total_trades:>10}")
-    print(f"{'总收益率':<20} {(bt_result['final_value']-100000)/1000:>14.2f}% {result.total_return*100:>14.2f}% {((bt_result['final_value']-100000)/1000 - result.total_return*100):>9.2f}%")
-    print(f"{'最终马丁阶梯':<20} {bt_result['martingale_step']:>15} {strategy.martingale_step:>15}")
+    print(
+        f"{'交易次数':<20} {bt_result['total_trades']:>15} {result.total_trades:>15} {bt_result['total_trades'] - result.total_trades:>10}"
+    )
+    print(
+        f"{'总收益率':<20} {(bt_result['final_value']-100000)/1000:>14.2f}% {result.total_return*100:>14.2f}% {((bt_result['final_value']-100000)/1000 - result.total_return*100):>9.2f}%"
+    )
+    print(
+        f"{'最终马丁阶梯':<20} {bt_result['martingale_step']:>15} {strategy.martingale_step:>15}"
+    )

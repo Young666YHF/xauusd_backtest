@@ -24,7 +24,7 @@ class DataLoader:
         symbol: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        interval: str = "15min"
+        interval: str = "15min",
     ) -> pd.DataFrame:
         """
         加载数据（子类实现）
@@ -41,9 +41,7 @@ class DataLoader:
         raise NotImplementedError
 
     def load_tick_data(
-        self,
-        filepath: Union[str, Path],
-        keep_utc: bool = True
+        self, filepath: Union[str, Path], keep_utc: bool = True
     ) -> pd.DataFrame:
         """
         加载Dukascopy格式的Tick数据
@@ -66,50 +64,59 @@ class DataLoader:
             df = pd.read_csv(filepath)
 
             # 检查列名
-            if 'Gmt time' in df.columns:
+            if "Gmt time" in df.columns:
                 # Dukascopy格式
-                df['Timestamp'] = pd.to_datetime(df['Gmt time'], format='%d.%m.%Y %H:%M:%S.%f')
-                df = df.rename(columns={
-                    'Ask': 'Ask',
-                    'Bid': 'Bid',
-                    'AskVolume': 'AskVolume',
-                    'BidVolume': 'BidVolume'
-                })
-            elif 'timestamp' in df.columns:
-                df['Timestamp'] = pd.to_datetime(df['timestamp'])
-                df = df.rename(columns={
-                    'ask': 'Ask',
-                    'bid': 'Bid',
-                    'ask_volume': 'AskVolume',
-                    'bid_volume': 'BidVolume'
-                })
+                df["Timestamp"] = pd.to_datetime(
+                    df["Gmt time"], format="%d.%m.%Y %H:%M:%S.%f"
+                )
+                df = df.rename(
+                    columns={
+                        "Ask": "Ask",
+                        "Bid": "Bid",
+                        "AskVolume": "AskVolume",
+                        "BidVolume": "BidVolume",
+                    }
+                )
+            elif "timestamp" in df.columns:
+                df["Timestamp"] = pd.to_datetime(df["timestamp"])
+                df = df.rename(
+                    columns={
+                        "ask": "Ask",
+                        "bid": "Bid",
+                        "ask_volume": "AskVolume",
+                        "bid_volume": "BidVolume",
+                    }
+                )
             else:
                 # 尝试无表头格式
                 df = pd.read_csv(filepath, header=None)
                 if len(df.columns) >= 5:
-                    df.columns = ['Timestamp', 'Ask', 'Bid', 'AskVolume', 'BidVolume'] + [f'Col_{i}' for i in range(5, len(df.columns))]
-                    df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+                    df.columns = [
+                        "Timestamp",
+                        "Ask",
+                        "Bid",
+                        "AskVolume",
+                        "BidVolume",
+                    ] + [f"Col_{i}" for i in range(5, len(df.columns))]
+                    df["Timestamp"] = pd.to_datetime(df["Timestamp"])
 
         except Exception as e:
             raise ValueError(f"无法解析数据文件 {filepath}: {e}")
 
         # 设置时间索引
-        df.set_index('Timestamp', inplace=True)
+        df.set_index("Timestamp", inplace=True)
 
         # 时区处理
         if df.index.tz is None:
-            df.index = df.index.tz_localize('UTC')
+            df.index = df.index.tz_localize("UTC")
 
         if not keep_utc:
-            df.index = df.index.tz_convert('Asia/Shanghai')
+            df.index = df.index.tz_convert("Asia/Shanghai")
 
         return df
 
     def resample_to_ohlcv(
-        self,
-        tick_df: pd.DataFrame,
-        interval: str = "15min",
-        price_col: str = "Mid"
+        self, tick_df: pd.DataFrame, interval: str = "15min", price_col: str = "Mid"
     ) -> pd.DataFrame:
         """
         将Tick数据重采样为OHLCV
@@ -129,14 +136,20 @@ class DataLoader:
             df["Mid"] = (df["Bid"] + df["Ask"]) / 2
 
         # 重采样
-        ohlcv = pd.DataFrame({
-            'Open': df[price_col].resample(interval).first(),
-            'High': df[price_col].resample(interval).max(),
-            'Low': df[price_col].resample(interval).min(),
-            'Close': df[price_col].resample(interval).last(),
-            'Volume': df.get('AskVolume', pd.Series(0, index=df.index)).resample(interval).sum() +
-                      df.get('BidVolume', pd.Series(0, index=df.index)).resample(interval).sum()
-        })
+        ohlcv = pd.DataFrame(
+            {
+                "Open": df[price_col].resample(interval).first(),
+                "High": df[price_col].resample(interval).max(),
+                "Low": df[price_col].resample(interval).min(),
+                "Close": df[price_col].resample(interval).last(),
+                "Volume": df.get("AskVolume", pd.Series(0, index=df.index))
+                .resample(interval)
+                .sum()
+                + df.get("BidVolume", pd.Series(0, index=df.index))
+                .resample(interval)
+                .sum(),
+            }
+        )
 
         # 删除空值
         ohlcv.dropna(inplace=True)
@@ -144,10 +157,7 @@ class DataLoader:
         return ohlcv
 
     def load_monthly_data(
-        self,
-        year: int,
-        month: int,
-        interval: str = "15min"
+        self, year: int, month: int, interval: str = "15min"
     ) -> pd.DataFrame:
         """
         加载单月数据
@@ -165,7 +175,7 @@ class DataLoader:
         # 2. tick目录格式: XAUUSD_{year}-{month}.csv
 
         # 先尝试kline格式
-        interval_short = interval.replace('min', 'm') if 'min' in interval else interval
+        interval_short = interval.replace("min", "m") if "min" in interval else interval
         kline_filename = f"XAUUSD_BID_{interval_short}_{year}{month:02d}.csv"
         kline_filepath = self.data_dir / "kline" / interval_short / kline_filename
 
@@ -174,14 +184,14 @@ class DataLoader:
             # 标准化列名（先处理，避免大小写敏感问题）
             df.columns = [c.strip().capitalize() for c in df.columns]
 
-            if 'Timestamp' in df.columns:
+            if "Timestamp" in df.columns:
                 # 毫秒级时间戳转换
-                df['Timestamp'] = pd.to_datetime(df['Timestamp'], unit='ms', utc=True)
-                df.set_index('Timestamp', inplace=True)
-            elif df.columns[0].lower() == 'timestamp':
+                df["Timestamp"] = pd.to_datetime(df["Timestamp"], unit="ms", utc=True)
+                df.set_index("Timestamp", inplace=True)
+            elif df.columns[0].lower() == "timestamp":
                 df = pd.read_csv(kline_filepath, index_col=0, parse_dates=True)
             if df.index.tz is None:
-                df.index = df.index.tz_localize('UTC')
+                df.index = df.index.tz_localize("UTC")
             return df
 
         # 再尝试tick格式（新命名规范）
@@ -200,13 +210,11 @@ class DataLoader:
             tick_df = self.load_tick_data(tick_filepath_legacy)
             return self.resample_to_ohlcv(tick_df, interval)
 
-        raise FileNotFoundError(f"数据文件不存在: {kline_filepath} 或 {tick_filepath} 或 {tick_filepath_legacy}")
+        raise FileNotFoundError(
+            f"数据文件不存在: {kline_filepath} 或 {tick_filepath} 或 {tick_filepath_legacy}"
+        )
 
-    def load_range(
-        self,
-        months: List[str],
-        interval: str = "15min"
-    ) -> pd.DataFrame:
+    def load_range(self, months: List[str], interval: str = "15min") -> pd.DataFrame:
         """
         加载多个月份的数据
 
@@ -221,7 +229,7 @@ class DataLoader:
 
         for month_str in months:
             try:
-                year, month = map(int, month_str.split('-'))
+                year, month = map(int, month_str.split("-"))
                 df = self.load_monthly_data(year, month, interval)
                 dfs.append(df)
             except FileNotFoundError:
@@ -236,7 +244,7 @@ class DataLoader:
 
         combined = pd.concat(dfs)
         combined = combined.sort_index()
-        combined = combined[~combined.index.duplicated(keep='first')]
+        combined = combined[~combined.index.duplicated(keep="first")]
 
         return combined
 
@@ -249,7 +257,7 @@ class CSVDataLoader(DataLoader):
         symbol: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        interval: str = "15min"
+        interval: str = "15min",
     ) -> pd.DataFrame:
         """
         从CSV加载OHLCV数据
@@ -267,25 +275,25 @@ class CSVDataLoader(DataLoader):
 
         # 标准化列名
         column_mapping = {
-            'Open': 'Open',
-            'High': 'High',
-            'Low': 'Low',
-            'Close': 'Close',
-            'Volume': 'Volume',
-            'Adj Close': 'Close'
+            "Open": "Open",
+            "High": "High",
+            "Low": "Low",
+            "Close": "Close",
+            "Volume": "Volume",
+            "Adj Close": "Close",
         }
 
         df = df.rename(columns=column_mapping)
 
         # 确保必要列存在
-        required_cols = ['Open', 'High', 'Low', 'Close']
+        required_cols = ["Open", "High", "Low", "Close"]
         missing = [c for c in required_cols if c not in df.columns]
         if missing:
             raise ValueError(f"缺少必要列: {missing}")
 
         # 添加Volume列（如果不存在）
-        if 'Volume' not in df.columns:
-            df['Volume'] = 0
+        if "Volume" not in df.columns:
+            df["Volume"] = 0
 
         # 日期过滤
         if start_date:
@@ -304,7 +312,7 @@ class ParquetDataLoader(DataLoader):
         symbol: str,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
-        interval: str = "15min"
+        interval: str = "15min",
     ) -> pd.DataFrame:
         """从Parquet加载数据"""
         filepath = self.data_dir / f"{symbol}.parquet"
@@ -324,8 +332,7 @@ class ParquetDataLoader(DataLoader):
 
 
 def create_data_loader(
-    data_dir: str = "/home/ctyun/xauusd_data",
-    format: str = "auto"
+    data_dir: str = "/home/ctyun/xauusd_data", format: str = "auto"
 ) -> DataLoader:
     """
     创建数据加载器

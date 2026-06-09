@@ -15,9 +15,17 @@ Dollar Trader Martingale with Stop Loss (带止损版)
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 
-from strategies.dollar_trader_base import DollarTraderBaseStrategy, calculate_dollar_trader_base_indicators
+from strategies.dollar_trader_base import (
+    DollarTraderBaseStrategy,
+    calculate_dollar_trader_base_indicators,
+)
 from core.types import TradeSignal, TradeDirection, SignalType, ExitReason
-from core.indicators import calculate_sma, calculate_bollinger_bands, calculate_bbw, calculate_atr
+from core.indicators import (
+    calculate_sma,
+    calculate_bollinger_bands,
+    calculate_bbw,
+    calculate_atr,
+)
 
 
 class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
@@ -47,51 +55,51 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
 
     def get_default_params(self) -> Dict[str, Any]:
         return {
-            'sma_short': 20,
-            'sma_medium': 50,
-            'sma_long': 200,
-            'position_size': 0.01,
-            'martingale_multiplier': 2.0,
-            'max_martingale_steps': 5,
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'bbw_ma_period': 50,
-            'stop_loss_atr_mult': 2.0,      # ATR止损倍数
-            'take_profit_atr_mult': 4.0,    # ATR止盈倍数
-            'cooldown_after_sl': 5,          # 止损后冷却K线数
+            "sma_short": 20,
+            "sma_medium": 50,
+            "sma_long": 200,
+            "position_size": 0.01,
+            "martingale_multiplier": 2.0,
+            "max_martingale_steps": 5,
+            "bb_period": 20,
+            "bb_std": 2.0,
+            "bbw_ma_period": 50,
+            "stop_loss_atr_mult": 2.0,  # ATR止损倍数
+            "take_profit_atr_mult": 4.0,  # ATR止盈倍数
+            "cooldown_after_sl": 5,  # 止损后冷却K线数
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         return {
-            'sma_short': (10, 40),
-            'sma_medium': (30, 80),
-            'sma_long': (100, 300),
-            'martingale_multiplier': (1.5, 2.5),
-            'max_martingale_steps': (2, 6),
-            'bb_period': (15, 40),
-            'bb_std': (1.5, 2.5),
-            'bbw_ma_period': (30, 100),
-            'stop_loss_atr_mult': (1.5, 3.0),
-            'take_profit_atr_mult': (3.0, 6.0),
+            "sma_short": (10, 40),
+            "sma_medium": (30, 80),
+            "sma_long": (100, 300),
+            "martingale_multiplier": (1.5, 2.5),
+            "max_martingale_steps": (2, 6),
+            "bb_period": (15, 40),
+            "bb_std": (1.5, 2.5),
+            "bbw_ma_period": (30, 100),
+            "stop_loss_atr_mult": (1.5, 3.0),
+            "take_profit_atr_mult": (3.0, 6.0),
         }
 
     def _calculate_position_size(self) -> float:
-        base_size = self.params['position_size']
-        multiplier = self.params['martingale_multiplier']
-        return base_size * (multiplier ** self.martingale_step)
+        base_size = self.params["position_size"]
+        multiplier = self.params["martingale_multiplier"]
+        return base_size * (multiplier**self.martingale_step)
 
     @property
     def current_position_size(self) -> float:
         return self._calculate_position_size()
 
     def _update_martingale_state(self, trade_record: Dict[str, Any]):
-        profit = trade_record.get('profit', 0)
-        exit_reason = trade_record.get('exit_reason')
+        profit = trade_record.get("profit", 0)
+        exit_reason = trade_record.get("exit_reason")
 
         if profit < 0:
             self.loss_count_in_step += 1
             if self.loss_count_in_step >= 2:
-                max_steps = self.params['max_martingale_steps']
+                max_steps = self.params["max_martingale_steps"]
                 if self.martingale_step < max_steps:
                     self.martingale_step += 1
                     self.loss_count_in_step = 0
@@ -105,17 +113,26 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
             self.last_stop_loss_bar = self.entry_bar
 
         # 平仓后重置
-        if exit_reason in [ExitReason.SIGNAL_REVERSE, ExitReason.FORCE_CLOSE, ExitReason.END_OF_DATA]:
+        if exit_reason in [
+            ExitReason.SIGNAL_REVERSE,
+            ExitReason.FORCE_CLOSE,
+            ExitReason.END_OF_DATA,
+        ]:
             self.current_position = None
             self.entry_price = None
 
-    def _validate_data(self, df: pd.DataFrame, current_idx: int) -> Optional[Tuple[str, str, str]]:
+    def _validate_data(
+        self, df: pd.DataFrame, current_idx: int
+    ) -> Optional[Tuple[str, str, str]]:
         """验证数据充足性（考虑ATR和BBW需要额外数据）"""
-        min_bars = max(
-            self.params['sma_long'],
-            self.params['bb_period'] + self.params['bbw_ma_period'],
-            14  # ATR period
-        ) + 10
+        min_bars = (
+            max(
+                self.params["sma_long"],
+                self.params["bb_period"] + self.params["bbw_ma_period"],
+                14,  # ATR period
+            )
+            + 10
+        )
 
         if current_idx < min_bars:
             return None
@@ -123,10 +140,7 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
         return super()._validate_data(df, current_idx)
 
     def _check_entry_filters(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        prev_bar: pd.Series
+        self, df: pd.DataFrame, current_idx: int, prev_bar: pd.Series
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         检查BBW和冷却期是否满足开仓条件
@@ -141,18 +155,18 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
         """
         # 冷却期检查
         bars_since_sl = current_idx - self.last_stop_loss_bar
-        if bars_since_sl < self.params['cooldown_after_sl']:
-            return False, {'cooldown': bars_since_sl}
+        if bars_since_sl < self.params["cooldown_after_sl"]:
+            return False, {"cooldown": bars_since_sl}
 
         # ATR值检查
-        atr = prev_bar.get('ATR', 0)
+        atr = prev_bar.get("ATR", 0)
         if pd.isna(atr) or atr <= 0:
-            atr = prev_bar.get('ATR_14', 0)
+            atr = prev_bar.get("ATR_14", 0)
         if pd.isna(atr) or atr <= 0:
-            return False, {'no_atr': True}
+            return False, {"no_atr": True}
 
         # BBW检查
-        bbw_col = 'BBW'
+        bbw_col = "BBW"
         bbw_ma_col = f"BBW_MA_{self.params['bbw_ma_period']}"
         allow_entry = True
         bbw_value, bbw_ma = 0.0, 0.0
@@ -164,16 +178,12 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
                 allow_entry = bbw_value > bbw_ma
 
         return allow_entry, {
-            'ATR': atr,
-            'BBW': bbw_value,
-            'BBW_MA': bbw_ma,
+            "ATR": atr,
+            "BBW": bbw_value,
+            "BBW_MA": bbw_ma,
         }
 
-    def _modify_entry_signal(
-        self,
-        signal: TradeSignal,
-        **kwargs
-    ) -> TradeSignal:
+    def _modify_entry_signal(self, signal: TradeSignal, **kwargs) -> TradeSignal:
         """
         为入场信号添加ATR动态止损止盈
 
@@ -184,13 +194,13 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
         Returns:
             修改后的信号
         """
-        filter_info = kwargs.get('filter_info', {})
-        atr = filter_info.get('ATR', 0)
+        filter_info = kwargs.get("filter_info", {})
+        atr = filter_info.get("ATR", 0)
         if not atr or atr <= 0:
             return signal
 
-        sl_mult = self.params['stop_loss_atr_mult']
-        tp_mult = self.params['take_profit_atr_mult']
+        sl_mult = self.params["stop_loss_atr_mult"]
+        tp_mult = self.params["take_profit_atr_mult"]
 
         if signal.direction == TradeDirection.LONG:
             signal.stop_loss = signal.entry_price - sl_mult * atr
@@ -211,8 +221,10 @@ class DollarTraderMartingaleSLStrategy(DollarTraderBaseStrategy):
         """交易完成回调"""
         self._update_martingale_state(trade_record)
 
-        if trade_record.get('exit_reason') in [
-            ExitReason.SIGNAL_REVERSE, ExitReason.FORCE_CLOSE, ExitReason.END_OF_DATA
+        if trade_record.get("exit_reason") in [
+            ExitReason.SIGNAL_REVERSE,
+            ExitReason.FORCE_CLOSE,
+            ExitReason.END_OF_DATA,
         ]:
             self.current_position = None
 
@@ -239,19 +251,21 @@ def calculate_dollar_trader_martingale_sl_indicators(
     bb_period: int = 20,
     bb_std: float = 2.0,
     bbw_ma_period: int = 50,
-    atr_period: int = 14
+    atr_period: int = 14,
 ) -> pd.DataFrame:
     """计算策略所需指标"""
-    result = calculate_dollar_trader_base_indicators(df, sma_short, sma_medium, sma_long)
+    result = calculate_dollar_trader_base_indicators(
+        df, sma_short, sma_medium, sma_long
+    )
 
     # BB & BBW
-    result['BB_Upper'], result['BB_Middle'], result['BB_Lower'] = calculate_bollinger_bands(
-        result['Close'], bb_period, bb_std
+    result["BB_Upper"], result["BB_Middle"], result["BB_Lower"] = (
+        calculate_bollinger_bands(result["Close"], bb_period, bb_std)
     )
-    result['BBW'] = calculate_bbw(result['Close'], bb_period, bb_std)
-    result[f'BBW_MA_{bbw_ma_period}'] = calculate_sma(result['BBW'], bbw_ma_period)
+    result["BBW"] = calculate_bbw(result["Close"], bb_period, bb_std)
+    result[f"BBW_MA_{bbw_ma_period}"] = calculate_sma(result["BBW"], bbw_ma_period)
 
     # ATR
-    result['ATR'] = calculate_atr(result, atr_period)
+    result["ATR"] = calculate_atr(result, atr_period)
 
     return result

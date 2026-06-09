@@ -11,14 +11,18 @@ from typing import Optional, Tuple
 # Numba并行支持
 try:
     from numba import njit, prange
+
     NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
+
     # 创建虚拟装饰器
     def njit(*args, **kwargs):
         def decorator(func):
             return func
+
         return decorator
+
     prange = range
 
 
@@ -40,10 +44,7 @@ def _sma_numba_parallel(data: np.ndarray, period: int) -> np.ndarray:
 
 @njit(parallel=True, cache=True, fastmath=True)
 def _atr_numba_parallel(
-    highs: np.ndarray,
-    lows: np.ndarray,
-    closes: np.ndarray,
-    period: int
+    highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int
 ) -> np.ndarray:
     """Numba并行版ATR计算"""
     n = len(highs)
@@ -55,8 +56,8 @@ def _atr_numba_parallel(
     # 计算TR
     for i in range(1, n):
         tr1 = highs[i] - lows[i]
-        tr2 = abs(highs[i] - closes[i-1])
-        tr3 = abs(lows[i] - closes[i-1])
+        tr2 = abs(highs[i] - closes[i - 1])
+        tr3 = abs(lows[i] - closes[i - 1])
         tr[i] = max(tr1, max(tr2, tr3))
 
     # 计算ATR (Wilder平滑)
@@ -65,7 +66,7 @@ def _atr_numba_parallel(
 
     alpha = 1.0 / period
     for i in range(period, n):
-        atr[i] = tr[i] * alpha + atr[i-1] * (1 - alpha)
+        atr[i] = tr[i] * alpha + atr[i - 1] * (1 - alpha)
 
     return atr
 
@@ -100,9 +101,9 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     Returns:
         ATR序列
     """
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
 
     # 真实波幅
     tr1 = high - low
@@ -112,15 +113,13 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
     # ATR - 使用 Wilder 平滑
-    atr = tr.ewm(alpha=1/period, min_periods=period).mean()
+    atr = tr.ewm(alpha=1 / period, min_periods=period).mean()
 
     return atr
 
 
 def calculate_sma_angle(
-    sma_series: pd.Series,
-    atr_series: pd.Series,
-    lookback: int = 5
+    sma_series: pd.Series, atr_series: pd.Series, lookback: int = 5
 ) -> pd.Series:
     """
     计算SMA均线的倾斜角度（量纲标准化版本）
@@ -157,9 +156,7 @@ def calculate_sma_angle(
 
 
 def calculate_bollinger_bands(
-    series: pd.Series,
-    period: int = 20,
-    std_dev: float = 2.0
+    series: pd.Series, period: int = 20, std_dev: float = 2.0
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     计算布林带
@@ -181,16 +178,16 @@ def calculate_bollinger_bands(
     return upper, middle, lower
 
 
-def calculate_bbw(series: pd.Series, period: int = 20, std_dev: float = 2.0) -> pd.Series:
+def calculate_bbw(
+    series: pd.Series, period: int = 20, std_dev: float = 2.0
+) -> pd.Series:
     """计算Bollinger Band Width (BBW) = (Upper - Lower) / Middle × 100"""
     bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(series, period, std_dev)
     return (bb_upper - bb_lower) / bb_middle * 100
 
 
 def calculate_keltner_channels(
-    df: pd.DataFrame,
-    period: int = 20,
-    atr_mult: float = 2.0
+    df: pd.DataFrame, period: int = 20, atr_mult: float = 2.0
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     计算肯特纳通道
@@ -203,7 +200,7 @@ def calculate_keltner_channels(
     Returns:
         (上轨, 中轨, 下轨)
     """
-    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
     middle = calculate_ema(typical_price, period)
     atr = calculate_atr(df, period)
 
@@ -234,8 +231,8 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     loss = (-delta).where(delta < 0, 0.0)
 
     # 使用 Wilder 平滑（RMA）：alpha = 1 / period
-    avg_gain = gain.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1.0/period, min_periods=period, adjust=False).mean()
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
     # 计算RS和RSI
     rs = avg_gain / avg_loss
@@ -257,14 +254,15 @@ def calculate_vwap(df: pd.DataFrame, reset_hour_et: int = 17) -> pd.Series:
     Returns:
         VWAP序列
     """
-    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
 
     # 获取"交易日"
     if df.index.tz is not None:
         # 转换为美东时间
         try:
             import pytz
-            et_tz = pytz.timezone('America/New_York')
+
+            et_tz = pytz.timezone("America/New_York")
             index_et = df.index.tz_convert(et_tz)
 
             # 计算交易日
@@ -273,33 +271,35 @@ def calculate_vwap(df: pd.DataFrame, reset_hour_et: int = 17) -> pd.Series:
 
             # 17:00之前的数据属于前一天
             mask_before_reset = hour_et < reset_hour_et
-            trading_day.loc[mask_before_reset] = trading_day.loc[mask_before_reset] - pd.Timedelta(days=1)
+            trading_day.loc[mask_before_reset] = trading_day.loc[
+                mask_before_reset
+            ] - pd.Timedelta(days=1)
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"VWAP timezone conversion failed: {e}, falling back to local date")
+
+            logging.getLogger(__name__).warning(
+                f"VWAP timezone conversion failed: {e}, falling back to local date"
+            )
             trading_day = pd.Series(df.index.date, index=df.index)
     else:
         trading_day = pd.Series(df.index.date, index=df.index)
 
     # 计算VWAP
-    tp_volume = typical_price * df['Volume']
+    tp_volume = typical_price * df["Volume"]
 
     vwap = pd.Series(index=df.index, dtype=float)
 
     for day in trading_day.unique():
         mask = trading_day == day
         cumulative_tp_vol = tp_volume[mask].cumsum()
-        cumulative_vol = df.loc[mask, 'Volume'].cumsum()
+        cumulative_vol = df.loc[mask, "Volume"].cumsum()
         vwap.loc[mask] = cumulative_tp_vol / cumulative_vol
 
     return vwap
 
 
 def calculate_macd(
-    series: pd.Series,
-    fast: int = 12,
-    slow: int = 26,
-    signal: int = 9
+    series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
 ) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     计算MACD
@@ -324,9 +324,7 @@ def calculate_macd(
 
 
 def calculate_stochastic(
-    df: pd.DataFrame,
-    k_period: int = 14,
-    d_period: int = 3
+    df: pd.DataFrame, k_period: int = 14, d_period: int = 3
 ) -> Tuple[pd.Series, pd.Series]:
     """
     计算随机指标 (Stochastic Oscillator)
@@ -339,16 +337,18 @@ def calculate_stochastic(
     Returns:
         (%K, %D)
     """
-    lowest_low = df['Low'].rolling(window=k_period, min_periods=k_period).min()
-    highest_high = df['High'].rolling(window=k_period, min_periods=k_period).max()
+    lowest_low = df["Low"].rolling(window=k_period, min_periods=k_period).min()
+    highest_high = df["High"].rolling(window=k_period, min_periods=k_period).max()
 
-    k = 100 * (df['Close'] - lowest_low) / (highest_high - lowest_low)
+    k = 100 * (df["Close"] - lowest_low) / (highest_high - lowest_low)
     d = k.rolling(window=d_period, min_periods=d_period).mean()
 
     return k, d
 
 
-def calculate_adx(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
+def calculate_adx(
+    df: pd.DataFrame, period: int = 14
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     计算ADX (平均趋向指数)
 
@@ -359,9 +359,9 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Ser
     Returns:
         (ADX, +DI, -DI)
     """
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"]
 
     # 真实波幅
     tr1 = high - low
@@ -377,13 +377,13 @@ def calculate_adx(df: pd.DataFrame, period: int = 14) -> Tuple[pd.Series, pd.Ser
     minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
 
     # 平滑
-    atr = tr.ewm(alpha=1/period, min_periods=period).mean()
-    plus_di = 100 * plus_dm.ewm(alpha=1/period, min_periods=period).mean() / atr
-    minus_di = 100 * minus_dm.ewm(alpha=1/period, min_periods=period).mean() / atr
+    atr = tr.ewm(alpha=1 / period, min_periods=period).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, min_periods=period).mean() / atr
 
     # DX和ADX
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.ewm(alpha=1/period, min_periods=period).mean()
+    adx = dx.ewm(alpha=1 / period, min_periods=period).mean()
 
     return adx, plus_di, minus_di
 
@@ -398,7 +398,7 @@ def add_all_indicators(
     rsi_period: int = 14,
     ema_fast: int = 20,
     ema_slow: int = 50,
-    vwap_reset_hour: int = 17
+    vwap_reset_hour: int = 17,
 ) -> pd.DataFrame:
     """
     添加所有指标到DataFrame
@@ -413,49 +413,49 @@ def add_all_indicators(
     result = df.copy()
 
     # 移动平均线
-    result[f'EMA_{ema_fast}'] = calculate_ema(result['Close'], ema_fast)
-    result[f'EMA_{ema_slow}'] = calculate_ema(result['Close'], ema_slow)
+    result[f"EMA_{ema_fast}"] = calculate_ema(result["Close"], ema_fast)
+    result[f"EMA_{ema_slow}"] = calculate_ema(result["Close"], ema_slow)
 
     # 布林带
     bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(
-        result['Close'], bb_period, bb_std
+        result["Close"], bb_period, bb_std
     )
-    result['BB_Upper'] = bb_upper
-    result['BB_Middle'] = bb_middle
-    result['BB_Lower'] = bb_lower
-    result['BB_Width'] = (bb_upper - bb_lower) / bb_middle
+    result["BB_Upper"] = bb_upper
+    result["BB_Middle"] = bb_middle
+    result["BB_Lower"] = bb_lower
+    result["BB_Width"] = (bb_upper - bb_lower) / bb_middle
 
     # 肯特纳通道
     kc_upper, kc_middle, kc_lower = calculate_keltner_channels(
         result, kc_period, kc_atr_mult
     )
-    result['KC_Upper'] = kc_upper
-    result['KC_Middle'] = kc_middle
-    result['KC_Lower'] = kc_lower
+    result["KC_Upper"] = kc_upper
+    result["KC_Middle"] = kc_middle
+    result["KC_Lower"] = kc_lower
 
     # 挤压指标（布林带在肯特纳通道内）
-    result['Squeeze_On'] = (bb_upper < kc_upper) & (bb_lower > kc_lower)
+    result["Squeeze_On"] = (bb_upper < kc_upper) & (bb_lower > kc_lower)
 
     # ATR
-    result['ATR'] = calculate_atr(result, atr_period)
+    result["ATR"] = calculate_atr(result, atr_period)
 
     # RSI
-    result['RSI'] = calculate_rsi(result['Close'], rsi_period)
+    result["RSI"] = calculate_rsi(result["Close"], rsi_period)
 
     # VWAP
-    if 'Volume' in result.columns:
-        result['VWAP'] = calculate_vwap(result, vwap_reset_hour)
+    if "Volume" in result.columns:
+        result["VWAP"] = calculate_vwap(result, vwap_reset_hour)
 
     # MACD
-    macd, signal, hist = calculate_macd(result['Close'])
-    result['MACD'] = macd
-    result['MACD_Signal'] = signal
-    result['MACD_Hist'] = hist
+    macd, signal, hist = calculate_macd(result["Close"])
+    result["MACD"] = macd
+    result["MACD_Signal"] = signal
+    result["MACD_Hist"] = hist
 
     # ADX
     adx, plus_di, minus_di = calculate_adx(result, atr_period)
-    result['ADX'] = adx
-    result['Plus_DI'] = plus_di
-    result['Minus_DI'] = minus_di
+    result["ADX"] = adx
+    result["Plus_DI"] = plus_di
+    result["Minus_DI"] = minus_di
 
     return result

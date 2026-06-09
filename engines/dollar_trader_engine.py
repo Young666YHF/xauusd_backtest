@@ -17,8 +17,11 @@ from datetime import datetime
 
 from engines.base import BaseBacktestEngine, ExecutionModel
 from core.types import (
-    TradeSignal, TradeRecord, TradeDirection,
-    ExitReason, BacktestResult
+    TradeSignal,
+    TradeRecord,
+    TradeDirection,
+    ExitReason,
+    BacktestResult,
 )
 from core.config import TradingConfig
 from core.events import EventType
@@ -38,7 +41,7 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         self,
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None,
-        risk_manager=None
+        risk_manager=None,
     ):
         # 【重要】强制使用零佣金模型（点差已包含佣金）
         # 避免入场时重复扣除佣金
@@ -64,7 +67,7 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         df: pd.DataFrame,
         signals: List[TradeSignal] = None,
         tick_df: Optional[pd.DataFrame] = None,
-        strategy=None  # 添加策略参数，用于回调和实时信号生成
+        strategy=None,  # 添加策略参数，用于回调和实时信号生成
     ) -> BacktestResult:
         """
         执行回测
@@ -88,12 +91,16 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
             bar_idx_to_ticks = self._prepare_tick_mapping(tick_df, df.index)
 
         # 如果提供了策略，使用实时信号生成模式
-        if strategy is not None and hasattr(strategy, 'generate_signal'):
+        if strategy is not None and hasattr(strategy, "generate_signal"):
             # 实时信号生成模式
-            warmup_bars = max(
-                strategy.params.get('sma_long', 200),
-                strategy.params.get('bb_period', 20) + strategy.params.get('bbw_ma_period', 50)
-            ) + 5
+            warmup_bars = (
+                max(
+                    strategy.params.get("sma_long", 200),
+                    strategy.params.get("bb_period", 20)
+                    + strategy.params.get("bbw_ma_period", 50),
+                )
+                + 5
+            )
 
             for i in range(len(df)):
                 self._current_bar_idx = i
@@ -141,70 +148,75 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         if self.position:
             last_bar = df.iloc[-1]
             self._close_position(
-                last_bar['Close'],
+                last_bar["Close"],
                 ExitReason.END_OF_DATA,
-                self._calculate_exit_slippage(last_bar['Close'])
+                self._calculate_exit_slippage(last_bar["Close"]),
             )
 
         return self._build_result()
 
     def _prepare_tick_mapping(
-        self,
-        tick_df: pd.DataFrame,
-        bar_timestamps: pd.DatetimeIndex
+        self, tick_df: pd.DataFrame, bar_timestamps: pd.DatetimeIndex
     ) -> Dict[int, Tuple[int, int]]:
         """准备Tick数据映射 - 使用向量化二分查找优化性能"""
         tick_times = tick_df.index.values
         bar_times = bar_timestamps.values
 
         # 使用searchsorted进行向量化查找，O(log n) per query instead of O(n)
-        start_indices = np.searchsorted(tick_times, bar_times, side='left')
+        start_indices = np.searchsorted(tick_times, bar_times, side="left")
         # 找到下一个bar的起点作为当前bar的终点
-        end_indices = np.searchsorted(tick_times, bar_times, side='right')
+        end_indices = np.searchsorted(tick_times, bar_times, side="right")
 
-        return {i: (int(start_indices[i]), int(end_indices[i])) for i in range(len(bar_times))}
+        return {
+            i: (int(start_indices[i]), int(end_indices[i]))
+            for i in range(len(bar_times))
+        }
 
     def _get_entry_price_from_ticks(
         self,
         signal: TradeSignal,
         bar: pd.Series,
         tick_df: pd.DataFrame,
-        bar_idx_to_ticks: Dict[int, Tuple[int, int]]
+        bar_idx_to_ticks: Dict[int, Tuple[int, int]],
     ) -> float:
         """从Tick数据获取入场价格"""
         bar_idx = signal.execution_bar_index
         if bar_idx not in bar_idx_to_ticks:
-            return bar['Open']
+            return bar["Open"]
 
         tick_start, tick_end = bar_idx_to_ticks[bar_idx]
         if tick_start >= tick_end:
-            return bar['Open']
+            return bar["Open"]
 
         # 获取第一个Tick的价格
-        first_tick_mid = (tick_df['bid'].iloc[tick_start] + tick_df['ask'].iloc[tick_start]) / 2
+        first_tick_mid = (
+            tick_df["bid"].iloc[tick_start] + tick_df["ask"].iloc[tick_start]
+        ) / 2
 
         # 根据方向调整(买入用Ask, 卖出用Bid)
         if signal.direction == TradeDirection.LONG:
-            return tick_df['ask'].iloc[tick_start]
+            return tick_df["ask"].iloc[tick_start]
         else:
-            return tick_df['bid'].iloc[tick_start]
+            return tick_df["bid"].iloc[tick_start]
 
     def _process_signal(
         self,
         signal: TradeSignal,
         bar: pd.Series,
         timestamp: datetime,
-        bar_idx_to_ticks: Optional[Dict[int, Tuple[int, int]]] = None
+        bar_idx_to_ticks: Optional[Dict[int, Tuple[int, int]]] = None,
     ):
         """处理交易信号"""
         # 确定入场价格
-        if bar_idx_to_ticks is not None and hasattr(self, '_tick_df'):
-            entry_price = self._get_entry_price_from_ticks(signal, bar, self._tick_df, bar_idx_to_ticks)
+        if bar_idx_to_ticks is not None and hasattr(self, "_tick_df"):
+            entry_price = self._get_entry_price_from_ticks(
+                signal, bar, self._tick_df, bar_idx_to_ticks
+            )
         else:
-            entry_price = signal.entry_price if signal.entry_price else bar['Open']
+            entry_price = signal.entry_price if signal.entry_price else bar["Open"]
 
         # 确保价格在合理范围内
-        entry_price = max(bar['Low'], min(bar['High'], entry_price))
+        entry_price = max(bar["Low"], min(bar["High"], entry_price))
 
         # 【修复】与Pine一致：执行滑点固定为0.1美元（10点）
         # 不再把点差的一半作为滑点，点差成本在平仓时扣除
@@ -212,7 +224,11 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
 
         # 【关键】从策略获取当前仓位大小（支持马丁格尔动态调整）
         # 必须在平仓前获取，确保反向开仓时使用相同的仓位大小
-        if hasattr(self, '_strategy') and self._strategy is not None and hasattr(self._strategy, 'get_position_size'):
+        if (
+            hasattr(self, "_strategy")
+            and self._strategy is not None
+            and hasattr(self._strategy, "get_position_size")
+        ):
             signal.size = self._strategy.get_position_size()
 
         if self.position:
@@ -224,7 +240,9 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
 
                 # 反向信号: 先平仓
                 exit_slippage = slippage  # 使用固定滑点
-                self._close_position(bar['Close'], ExitReason.SIGNAL_REVERSE, exit_slippage)
+                self._close_position(
+                    bar["Close"], ExitReason.SIGNAL_REVERSE, exit_slippage
+                )
                 self.signal_exits += 1
 
                 # 【修复】反向开仓使用平仓前的仓位大小，不重新获取
@@ -233,12 +251,24 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
 
                 # 然后开新仓(如果信号方向明确)
                 if signal.direction in [TradeDirection.LONG, TradeDirection.SHORT]:
-                    self._open_position(signal, entry_price + slippage if signal.direction == TradeDirection.LONG else entry_price - slippage, slippage)
+                    self._open_position(
+                        signal,
+                        (
+                            entry_price + slippage
+                            if signal.direction == TradeDirection.LONG
+                            else entry_price - slippage
+                        ),
+                        slippage,
+                    )
             # 如果同向信号，忽略
         else:
             # 无持仓，直接开仓
             if signal.direction in [TradeDirection.LONG, TradeDirection.SHORT]:
-                adjusted_price = entry_price + slippage if signal.direction == TradeDirection.LONG else entry_price - slippage
+                adjusted_price = (
+                    entry_price + slippage
+                    if signal.direction == TradeDirection.LONG
+                    else entry_price - slippage
+                )
                 self._open_position(signal, adjusted_price, slippage)
 
     def _check_position_exit(self, bar: pd.Series, timestamp: datetime):
@@ -253,10 +283,7 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         return 0.1
 
     def _close_position(
-        self,
-        exit_price: float,
-        exit_reason: ExitReason,
-        slippage: float = 0.0
+        self, exit_price: float, exit_reason: ExitReason, slippage: float = 0.0
     ) -> TradeRecord:
         """平仓并创建交易记录"""
         if not self.position:
@@ -275,7 +302,9 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         # 【Bug修复】点差成本按仓位比例计算
         # 每0.01手往返成本=0.6美元，即每手成本=60美元
         # 成本 = 每手成本 × 仓位大小
-        total_spread_cost = self.config.spread_per_ounce * self.config.contract_size * pos.size
+        total_spread_cost = (
+            self.config.spread_per_ounce * self.config.contract_size * pos.size
+        )
 
         # 计算盈亏
         pnl = pnl_points * self.config.contract_size * pos.size - total_spread_cost
@@ -287,7 +316,11 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
         # 创建交易记录
         trade = TradeRecord(
             entry_time=pos.entry_time,
-            exit_time=self._df.index[self._current_bar_idx] if self._df is not None else pos.entry_time,
+            exit_time=(
+                self._df.index[self._current_bar_idx]
+                if self._df is not None
+                else pos.entry_time
+            ),
             direction=pos.direction,
             size=pos.size,
             entry_price=pos.entry_price,
@@ -299,7 +332,7 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
             bars_held=self._current_bar_idx - pos.entry_bar_index,
             entry_slippage=0.0,
             exit_slippage=slippage,
-            commission=total_spread_cost
+            commission=total_spread_cost,
         )
 
         self.trades.append(trade)
@@ -320,19 +353,21 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
             EventType.POSITION_CLOSED,
             source=self.__class__.__name__,
             trade=trade,
-            position=pos
+            position=pos,
         )
 
         # 【关键】调用策略的on_trade_completed回调，更新马丁格尔状态
-        if hasattr(self, '_strategy') and self._strategy is not None:
-            self._strategy.on_trade_completed({
-                'profit': pnl,
-                'direction': pos.direction,
-                'entry_price': pos.entry_price,
-                'exit_price': exit_price_adjusted,
-                'size': pos.size,
-                'exit_reason': exit_reason,
-            })
+        if hasattr(self, "_strategy") and self._strategy is not None:
+            self._strategy.on_trade_completed(
+                {
+                    "profit": pnl,
+                    "direction": pos.direction,
+                    "entry_price": pos.entry_price,
+                    "exit_price": exit_price_adjusted,
+                    "size": pos.size,
+                    "exit_reason": exit_reason,
+                }
+            )
 
         self.position = None
         return trade
@@ -343,9 +378,9 @@ class DollarTraderBacktestEngine(BaseBacktestEngine):
 
         # 添加额外统计
         result.strategy_stats = {
-            'long_trades': self.long_trades,
-            'short_trades': self.short_trades,
-            'signal_exits': self.signal_exits,
+            "long_trades": self.long_trades,
+            "short_trades": self.short_trades,
+            "signal_exits": self.signal_exits,
         }
 
         return result

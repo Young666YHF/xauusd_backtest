@@ -16,6 +16,7 @@ from core.types import OptimizationResult
 @dataclass
 class OptimizationCallback:
     """优化回调"""
+
     on_trial_complete: Optional[Callable[[int, Dict, float], None]] = None
     on_best_updated: Optional[Callable[[Dict, float], None]] = None
     on_optimization_end: Optional[Callable[[OptimizationResult], None]] = None
@@ -36,7 +37,7 @@ class BaseOptimizer(ABC):
         timeout: Optional[int] = None,
         n_jobs: int = -1,
         min_trades: int = 30,
-        optimization_target: str = 'calmar'
+        optimization_target: str = "calmar",
     ):
         """
         初始化优化器
@@ -68,7 +69,7 @@ class BaseOptimizer(ABC):
     def optimize(
         self,
         objective_func: Callable[[Dict[str, Any]], float],
-        callback: Optional[OptimizationCallback] = None
+        callback: Optional[OptimizationCallback] = None,
     ) -> OptimizationResult:
         """
         执行优化
@@ -92,6 +93,7 @@ class BaseOptimizer(ABC):
         Returns:
             适应度值（越高越好）
         """
+
         # 统一从 dict 或 BacktestResult 中提取字段
         def _get(attr, default=0):
             if hasattr(result, attr):
@@ -101,35 +103,30 @@ class BaseOptimizer(ABC):
             return default
 
         # 检查最小交易次数
-        if _get('total_trades', 0) < self.min_trades:
-            return -float('inf')
+        if _get("total_trades", 0) < self.min_trades:
+            return -float("inf")
 
         target = self.optimization_target
 
-        if target == 'sharpe':
-            return _get('sharpe_ratio', 0)
-        elif target == 'calmar':
-            return _get('calmar_ratio', 0)
-        elif target == 'profit_factor':
-            return _get('profit_factor', 0)
-        elif target == 'win_rate':
-            return _get('win_rate', 0)
-        elif target == 'total_return':
-            return _get('total_return', 0)
+        if target == "sharpe":
+            return _get("sharpe_ratio", 0)
+        elif target == "calmar":
+            return _get("calmar_ratio", 0)
+        elif target == "profit_factor":
+            return _get("profit_factor", 0)
+        elif target == "win_rate":
+            return _get("win_rate", 0)
+        elif target == "total_return":
+            return _get("total_return", 0)
         else:
             # 综合评分
-            sharpe = _get('sharpe_ratio', 0)
-            calmar = _get('calmar_ratio', 0)
-            pf = _get('profit_factor', 0)
-            win_rate = _get('win_rate', 0)
+            sharpe = _get("sharpe_ratio", 0)
+            calmar = _get("calmar_ratio", 0)
+            pf = _get("profit_factor", 0)
+            win_rate = _get("win_rate", 0)
 
             # 加权综合
-            score = (
-                sharpe * 0.3 +
-                calmar * 0.3 +
-                min(pf, 3.0) * 0.2 +
-                win_rate * 0.2
-            )
+            score = sharpe * 0.3 + calmar * 0.3 + min(pf, 3.0) * 0.2 + win_rate * 0.2
             return score
 
     def suggest_params(self, trial) -> Dict[str, Any]:

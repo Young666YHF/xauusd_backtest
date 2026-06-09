@@ -13,8 +13,12 @@ import numpy as np
 from datetime import datetime
 
 from core.types import (
-    TradeSignal, TradeRecord, Position, TradeDirection,
-    ExitReason, BacktestResult
+    TradeSignal,
+    TradeRecord,
+    Position,
+    TradeDirection,
+    ExitReason,
+    BacktestResult,
 )
 from core.config import TradingConfig
 from core.events import EventBus, EventType
@@ -23,6 +27,7 @@ from core.risk_manager import RiskManager
 
 class StrategyCategory(Enum):
     """策略分类 - 用于差异化执行参数"""
+
     MEAN_REVERSION = 1  # 均值回归策略（策略A）
     MOMENTUM_BREAKOUT = 2  # 动量突破策略（策略B）
 
@@ -35,6 +40,7 @@ class ExecutionModel:
     每手往返成本 = spread_per_ounce × contract_size = 0.6 × 100 = 60美元/手
     每0.01手往返成本 = 60 × 0.01 = 0.6美元
     """
+
     spread_per_ounce: float = 0.6  # 与TradingConfig一致
     contract_size: int = 100
 
@@ -55,7 +61,7 @@ class ExecutionModel:
         self,
         price: float,
         atr: float,
-        strategy_category: StrategyCategory = StrategyCategory.MEAN_REVERSION
+        strategy_category: StrategyCategory = StrategyCategory.MEAN_REVERSION,
     ) -> float:
         """计算入场滑点"""
         if strategy_category == StrategyCategory.MOMENTUM_BREAKOUT:
@@ -68,12 +74,15 @@ class ExecutionModel:
         price: float,
         atr: float,
         exit_reason: ExitReason,
-        strategy_category: StrategyCategory = StrategyCategory.MEAN_REVERSION
+        strategy_category: StrategyCategory = StrategyCategory.MEAN_REVERSION,
     ) -> float:
         """计算出场滑点"""
         if exit_reason == ExitReason.STOP_LOSS:
             # 止损滑点更大（流动性枯竭）
-            return self.base_slippage * self.stop_loss_slippage_mult + atr * self.stop_loss_atr_ratio
+            return (
+                self.base_slippage * self.stop_loss_slippage_mult
+                + atr * self.stop_loss_atr_ratio
+            )
         elif exit_reason == ExitReason.TAKE_PROFIT:
             # 止盈滑点较小（限价单）
             return 0.0
@@ -97,7 +106,7 @@ class BaseBacktestEngine(ABC):
         self,
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None,
-        risk_manager: Optional[RiskManager] = None
+        risk_manager: Optional[RiskManager] = None,
     ):
         self.config = config
         self.execution = execution_model or ExecutionModel()
@@ -122,11 +131,7 @@ class BaseBacktestEngine(ABC):
         self._df: Optional[pd.DataFrame] = None
 
     @abstractmethod
-    def run(
-        self,
-        df: pd.DataFrame,
-        signals: List[TradeSignal]
-    ) -> BacktestResult:
+    def run(self, df: pd.DataFrame, signals: List[TradeSignal]) -> BacktestResult:
         """
         执行回测
 
@@ -159,10 +164,7 @@ class BaseBacktestEngine(ABC):
         return equity
 
     def _open_position(
-        self,
-        signal: TradeSignal,
-        filled_price: float,
-        slippage: float = 0.0
+        self, signal: TradeSignal, filled_price: float, slippage: float = 0.0
     ) -> Optional[Position]:
         """开仓 - 支持资金百分比风险管理"""
 
@@ -175,7 +177,7 @@ class BaseBacktestEngine(ABC):
                     EventType.ORDER_REJECTED,
                     source=self.__class__.__name__,
                     signal=signal,
-                    reason=reason
+                    reason=reason,
                 )
                 return None
 
@@ -196,7 +198,9 @@ class BaseBacktestEngine(ABC):
                 position_size = risk_amount / (stop_distance * point_value)
 
                 # 限制最大手数（防止极端情况）
-                max_size = current_equity / (filled_price * self.config.contract_size / self.config.leverage)
+                max_size = current_equity / (
+                    filled_price * self.config.contract_size / self.config.leverage
+                )
                 position_size = min(position_size, max_size * 0.9)  # 留10%余量
             else:
                 position_size = 0.01  # 最小手数兜底
@@ -219,7 +223,7 @@ class BaseBacktestEngine(ABC):
             strategy_id=signal.strategy_id,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
-            entry_bar_index=self._current_bar_idx
+            entry_bar_index=self._current_bar_idx,
         )
 
         self.position = position
@@ -236,16 +240,13 @@ class BaseBacktestEngine(ABC):
             position=position,
             signal=signal,
             slippage=slippage,
-            commission=commission
+            commission=commission,
         )
 
         return position
 
     def _close_position(
-        self,
-        exit_price: float,
-        exit_reason: ExitReason,
-        slippage: float = 0.0
+        self, exit_price: float, exit_reason: ExitReason, slippage: float = 0.0
     ) -> TradeRecord:
         """平仓"""
         if not self.position:
@@ -268,7 +269,9 @@ class BaseBacktestEngine(ABC):
         # 【修复】扣除点差成本（已包含佣金）
         # 每手往返成本 = spread_per_ounce × contract_size
         # 每0.01手成本 = 0.6 × 100 × 0.01 = 0.6美元
-        spread_cost = self.config.spread_per_ounce * self.config.contract_size * pos.size
+        spread_cost = (
+            self.config.spread_per_ounce * self.config.contract_size * pos.size
+        )
         pnl -= spread_cost
 
         # 扣除额外佣金（如果有）
@@ -279,7 +282,11 @@ class BaseBacktestEngine(ABC):
         # 创建交易记录
         trade = TradeRecord(
             entry_time=pos.entry_time,
-            exit_time=self._df.index[self._current_bar_idx] if self._df is not None else pos.entry_time,
+            exit_time=(
+                self._df.index[self._current_bar_idx]
+                if self._df is not None
+                else pos.entry_time
+            ),
             direction=pos.direction,
             size=pos.size,
             entry_price=pos.entry_price,
@@ -291,7 +298,7 @@ class BaseBacktestEngine(ABC):
             bars_held=self._current_bar_idx - pos.entry_bar_index,
             entry_slippage=0.0,
             exit_slippage=slippage,
-            commission=spread_cost + commission  # 记录总成本
+            commission=spread_cost + commission,  # 记录总成本
         )
 
         self.trades.append(trade)
@@ -312,17 +319,14 @@ class BaseBacktestEngine(ABC):
             EventType.POSITION_CLOSED,
             source=self.__class__.__name__,
             trade=trade,
-            position=pos
+            position=pos,
         )
 
         self.position = None
         return trade
 
     def _check_exit_conditions(
-        self,
-        high: float,
-        low: float,
-        close: float
+        self, high: float, low: float, close: float
     ) -> Optional[ExitReason]:
         """检查出场条件"""
         if not self.position:
@@ -357,7 +361,9 @@ class BaseBacktestEngine(ABC):
         result.total_trades = self.total_trades
         result.winning_trades = self.winning_trades
         result.losing_trades = self.losing_trades
-        result.win_rate = self.winning_trades / self.total_trades if self.total_trades > 0 else 0
+        result.win_rate = (
+            self.winning_trades / self.total_trades if self.total_trades > 0 else 0
+        )
 
         # 盈亏统计
         result.total_pnl = sum(t.pnl for t in self.trades)
@@ -373,7 +379,9 @@ class BaseBacktestEngine(ABC):
         # 盈利因子
         total_gains = sum(t.pnl for t in self.trades if t.is_win)
         total_losses = abs(sum(t.pnl for t in self.trades if t.is_loss))
-        result.profit_factor = total_gains / total_losses if total_losses > 0 else float('inf')
+        result.profit_factor = (
+            total_gains / total_losses if total_losses > 0 else float("inf")
+        )
 
         # 权益曲线
         result.equity_curve = self.equity_curve.copy()
@@ -390,7 +398,9 @@ class BaseBacktestEngine(ABC):
                 # 回撤金额
                 dd_value = peak - equity
                 # 回撤率：基于初始资金计算（更直观）
-                dd_pct = dd_value / self.initial_capital if self.initial_capital > 0 else 0
+                dd_pct = (
+                    dd_value / self.initial_capital if self.initial_capital > 0 else 0
+                )
                 if dd_value > max_dd_value:
                     max_dd_value = dd_value
                     max_dd = dd_pct
@@ -408,7 +418,9 @@ class BaseBacktestEngine(ABC):
                 # 索提诺比率（只考虑下行波动）
                 downside_returns = returns[returns < 0]
                 if len(downside_returns) > 0 and downside_returns.std() > 0:
-                    result.sortino_ratio = (returns.mean() / downside_returns.std()) * annual_factor
+                    result.sortino_ratio = (
+                        returns.mean() / downside_returns.std()
+                    ) * annual_factor
 
         # 卡玛比率（年化收益率 / 最大回撤）
         if result.max_drawdown_pct != 0 and len(self.equity_curve) > 1:

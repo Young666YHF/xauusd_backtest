@@ -20,21 +20,24 @@ from .base import BaseBacktestEngine, ExecutionModel, StrategyCategory
 from core.types import TradeSignal, ExitReason, BacktestResult, TradeDirection
 from core.config import TradingConfig
 
-
 # =============================================================================
 # Numba JIT编译的核心函数 - 放在模块顶层以便编译
 # =============================================================================
 
 try:
     from numba import njit, prange
+
     NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
+
     # 创建虚拟装饰器
     def njit(*args, **kwargs):
         def decorator(func):
             return func
+
         return decorator
+
     prange = range
 
 
@@ -51,7 +54,7 @@ def _check_ticks_for_exit_numba(
     entry_price: float,
     entry_bar: int,
     max_bars: int,
-    current_bar: int
+    current_bar: int,
 ) -> Tuple[int, float, int]:  # (exit_code, exit_price, tick_idx)
     """
     Numba加速的tick出场检查
@@ -92,7 +95,7 @@ def _find_entry_in_ticks_numba(
     tick_start: int,
     tick_end: int,
     is_long: bool,
-    target_price: float
+    target_price: float,
 ) -> Tuple[bool, float, int]:  # (found, price, tick_idx)
     """
     Numba加速的入场价格查找
@@ -131,7 +134,7 @@ class TickBacktestEngine(BaseBacktestEngine):
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None,
         risk_manager=None,
-        max_bars: Optional[int] = None
+        max_bars: Optional[int] = None,
     ):
         super().__init__(config, execution_model, risk_manager)
         # 强制使用Numba，Numba不可用时报错
@@ -165,9 +168,7 @@ class TickBacktestEngine(BaseBacktestEngine):
         self._tick_asks = None
 
     def prepare_tick_data(
-        self,
-        tick_df: pd.DataFrame,
-        bar_timestamps: pd.DatetimeIndex
+        self, tick_df: pd.DataFrame, bar_timestamps: pd.DatetimeIndex
     ) -> np.ndarray:
         """
         准备Tick数据，建立K线索引到Tick索引的映射
@@ -211,7 +212,7 @@ class TickBacktestEngine(BaseBacktestEngine):
         self,
         df: pd.DataFrame,
         signals: List[TradeSignal],
-        tick_df: Optional[pd.DataFrame] = None
+        tick_df: Optional[pd.DataFrame] = None,
     ) -> BacktestResult:
         """
         执行Tick级回测
@@ -232,9 +233,9 @@ class TickBacktestEngine(BaseBacktestEngine):
         if tick_df is not None:
             self.bar_idx_to_ticks = self.prepare_tick_data(tick_df, df.index)
             # 缓存numpy数组引用，避免重复访问
-            self._tick_mids = tick_df['Mid'].values
-            self._tick_bids = tick_df['Bid'].values
-            self._tick_asks = tick_df['Ask'].values
+            self._tick_mids = tick_df["Mid"].values
+            self._tick_bids = tick_df["Bid"].values
+            self._tick_asks = tick_df["Ask"].values
 
         # 按执行索引排序信号 - 使用defaultdict优化
         signal_dict = defaultdict(list)
@@ -264,11 +265,7 @@ class TickBacktestEngine(BaseBacktestEngine):
         # 强制平仓
         if self.position:
             last_bar = df.iloc[-1]
-            self._close_position(
-                last_bar['Close'],
-                ExitReason.END_OF_DATA,
-                0.0
-            )
+            self._close_position(last_bar["Close"], ExitReason.END_OF_DATA, 0.0)
 
         return self._build_result()
 
@@ -284,22 +281,27 @@ class TickBacktestEngine(BaseBacktestEngine):
 
         # 调用Numba加速函数检查出场条件
         exit_code, exit_price, _ = _check_ticks_for_exit_numba(
-            self._tick_mids, self._tick_bids, self._tick_asks,
-            tick_start, tick_end,
+            self._tick_mids,
+            self._tick_bids,
+            self._tick_asks,
+            tick_start,
+            tick_end,
             pos.is_long,
             pos.stop_loss if pos.stop_loss else 0.0,
             pos.take_profit if pos.take_profit else 0.0,
             pos.entry_price,
             pos.entry_bar_index,
             self.max_bars,
-            bar_idx
+            bar_idx,
         )
 
-        atr = bar.get('ATR', 0)
+        atr = bar.get("ATR", 0)
 
         # 处理出场
         if exit_code == 1:  # 止损
-            slippage = self._calculate_exit_slippage(exit_price, atr, ExitReason.STOP_LOSS)
+            slippage = self._calculate_exit_slippage(
+                exit_price, atr, ExitReason.STOP_LOSS
+            )
             self._close_position(exit_price, ExitReason.STOP_LOSS, slippage)
             return
         elif exit_code == 2:  # 止盈
@@ -308,29 +310,31 @@ class TickBacktestEngine(BaseBacktestEngine):
 
         # 检查时间止损（在K线结束时）
         if pos.bars_held >= self.max_bars:
-            slippage = self._calculate_exit_slippage(bar['Close'], atr, ExitReason.TIME_STOP)
-            self._close_position(bar['Close'], ExitReason.TIME_STOP, slippage)
+            slippage = self._calculate_exit_slippage(
+                bar["Close"], atr, ExitReason.TIME_STOP
+            )
+            self._close_position(bar["Close"], ExitReason.TIME_STOP, slippage)
             return
 
-    def _process_entry(
-        self,
-        signal: TradeSignal,
-        bar: pd.Series
-    ):
+    def _process_entry(self, signal: TradeSignal, bar: pd.Series):
         """
         处理入场 - 灵活入场模式（强制Numba加速）
 
         当信号入场价超出当前K线范围时，以开盘价追单成交。
         不使用未来数据，只使用当前K线的 OHLC。
         """
-        atr = bar.get('ATR', 0)
-        strategy_category = StrategyCategory.MEAN_REVERSION if 'MeanReversion' in signal.strategy_id else StrategyCategory.MOMENTUM_BREAKOUT
+        atr = bar.get("ATR", 0)
+        strategy_category = (
+            StrategyCategory.MEAN_REVERSION
+            if "MeanReversion" in signal.strategy_id
+            else StrategyCategory.MOMENTUM_BREAKOUT
+        )
 
         # 确定入场价格（强制使用Numba加速）
         entry_price = self._find_entry_price_tick(signal)
 
         if entry_price is None:
-            entry_price = bar['Open']
+            entry_price = bar["Open"]
 
         # 灵活入场：调整超出K线范围的入场价
         # 不使用未来数据，只使用当前K线的 Open/High/Low
@@ -339,36 +343,38 @@ class TickBacktestEngine(BaseBacktestEngine):
 
         if signal.direction == TradeDirection.LONG:
             # 做多：入场价不能高于High，不能低于Low
-            if entry_price > bar['High']:
+            if entry_price > bar["High"]:
                 # 跳空高开：以开盘价追入（模拟开盘市价单）
-                entry_price = bar['Open']
+                entry_price = bar["Open"]
                 adjusted = True
-            elif entry_price < bar['Low']:
+            elif entry_price < bar["Low"]:
                 # 低于最低价：使用Low（价格已经到过）
-                entry_price = bar['Low']
+                entry_price = bar["Low"]
                 adjusted = True
         else:
             # 做空：入场价不能低于Low，不能高于High
-            if entry_price < bar['Low']:
+            if entry_price < bar["Low"]:
                 # 跳空低开：以开盘价追入
-                entry_price = bar['Open']
+                entry_price = bar["Open"]
                 adjusted = True
-            elif entry_price > bar['High']:
+            elif entry_price > bar["High"]:
                 # 高于最高价：使用High（价格已经到过）
-                entry_price = bar['High']
+                entry_price = bar["High"]
                 adjusted = True
 
         # 记录调整（调试用）
         if adjusted:
-            if not hasattr(self, '_adjusted_entries'):
+            if not hasattr(self, "_adjusted_entries"):
                 self._adjusted_entries = []
-            self._adjusted_entries.append({
-                'timestamp': signal.timestamp,
-                'direction': signal.direction.name,
-                'original': original_price,
-                'adjusted': entry_price,
-                'bar_ohlc': (bar['Open'], bar['High'], bar['Low'], bar['Close'])
-            })
+            self._adjusted_entries.append(
+                {
+                    "timestamp": signal.timestamp,
+                    "direction": signal.direction.name,
+                    "original": original_price,
+                    "adjusted": entry_price,
+                    "bar_ohlc": (bar["Open"], bar["High"], bar["Low"], bar["Close"]),
+                }
+            )
 
         # 计算滑点
         slippage = self.execution.calculate_entry_slippage(
@@ -405,9 +411,12 @@ class TickBacktestEngine(BaseBacktestEngine):
         # 调用Numba加速函数
         is_long = signal.direction == TradeDirection.LONG
         found, price, _ = _find_entry_in_ticks_numba(
-            self._tick_bids, self._tick_asks,
-            tick_start, tick_end,
-            is_long, signal.entry_price
+            self._tick_bids,
+            self._tick_asks,
+            tick_start,
+            tick_end,
+            is_long,
+            signal.entry_price,
         )
 
         if found:
@@ -420,14 +429,11 @@ class TickBacktestEngine(BaseBacktestEngine):
         return None
 
     def _calculate_exit_slippage(
-        self,
-        price: float,
-        atr: float,
-        exit_reason: ExitReason
+        self, price: float, atr: float, exit_reason: ExitReason
     ) -> float:
         """计算出场滑点"""
         strategy_category = StrategyCategory.MEAN_REVERSION
-        if self.position and 'Momentum' in self.position.strategy_id:
+        if self.position and "Momentum" in self.position.strategy_id:
             strategy_category = StrategyCategory.MOMENTUM_BREAKOUT
 
         return self.execution.calculate_exit_slippage(
@@ -439,7 +445,7 @@ class TickBacktestEngine(BaseBacktestEngine):
         df: pd.DataFrame,
         strategy,
         warmup_bars: int = 100,
-        tick_df: Optional[pd.DataFrame] = None
+        tick_df: Optional[pd.DataFrame] = None,
     ) -> BacktestResult:
         """
         使用策略对象运行回测

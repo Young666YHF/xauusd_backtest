@@ -18,7 +18,10 @@ project_root = os.path.dirname(backend_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from strategies.dollar_trader import DollarTraderStrategy, calculate_dollar_trader_indicators
+from strategies.dollar_trader import (
+    DollarTraderStrategy,
+    calculate_dollar_trader_indicators,
+)
 from core.config import TradingConfig, get_config
 from engines.dollar_trader_engine import DollarTraderBacktestEngine
 from core.types import TradeDirection
@@ -30,6 +33,7 @@ router = APIRouter(prefix="/api/dollar-trader", tags=["dollar-trader"])
 
 class DollarTraderBacktestRequest(BaseModel):
     """美元策略回测请求"""
+
     sma_short: int = 20
     sma_medium: int = 50
     sma_long: int = 200
@@ -43,6 +47,7 @@ class DollarTraderBacktestRequest(BaseModel):
 
 class TradeRecord(BaseModel):
     """交易记录"""
+
     entry_time: str
     exit_time: str
     direction: str
@@ -56,12 +61,14 @@ class TradeRecord(BaseModel):
 
 class EquityPoint(BaseModel):
     """权益点"""
+
     timestamp: str
     equity: float
 
 
 class BacktestResult(BaseModel):
     """回测结果"""
+
     total_trades: int
     winning_trades: int
     losing_trades: int
@@ -85,6 +92,7 @@ class BacktestResult(BaseModel):
 
 class DollarTraderBacktestResponse(BaseModel):
     """美元策略回测响应"""
+
     success: bool
     result: Optional[BacktestResult] = None
     equity_curve: Optional[List[EquityPoint]] = None
@@ -102,7 +110,7 @@ def load_kline_data(data_dir: str, start_date: str, end_date: str) -> pd.DataFra
     months = []
     current = start_dt.replace(day=1)
     while current <= end_dt:
-        months.append(current.strftime('%Y-%m'))
+        months.append(current.strftime("%Y-%m"))
         if current.month == 12:
             current = current.replace(year=current.year + 1, month=1)
         else:
@@ -120,7 +128,7 @@ def load_kline_data(data_dir: str, start_date: str, end_date: str) -> pd.DataFra
 
     ohlc_df = pd.concat(dfs)
     ohlc_df = ohlc_df.sort_index()
-    ohlc_df = ohlc_df[~ohlc_df.index.duplicated(keep='first')]
+    ohlc_df = ohlc_df[~ohlc_df.index.duplicated(keep="first")]
     ohlc_df = ohlc_df.loc[start_date:end_date]
 
     return ohlc_df
@@ -132,16 +140,11 @@ async def run_backtest(request: DollarTraderBacktestRequest):
     try:
         # 加载数据（使用服务端配置，忽略用户传入的路径）
         data_dir = get_config().data.data_dir
-        ohlc_df = load_kline_data(
-            data_dir,
-            request.start_date,
-            request.end_date
-        )
+        ohlc_df = load_kline_data(data_dir, request.start_date, request.end_date)
 
         if len(ohlc_df) == 0:
             return DollarTraderBacktestResponse(
-                success=False,
-                error="没有加载到数据，请检查日期范围和data目录"
+                success=False, error="没有加载到数据，请检查日期范围和data目录"
             )
 
         # 计算指标
@@ -149,18 +152,20 @@ async def run_backtest(request: DollarTraderBacktestRequest):
             ohlc_df,
             sma_short=request.sma_short,
             sma_medium=request.sma_medium,
-            sma_long=request.sma_long
+            sma_long=request.sma_long,
         )
 
         # 创建策略
         strategy_params = {
-            'sma_short': request.sma_short,
-            'sma_medium': request.sma_medium,
-            'sma_long': request.sma_long,
-            'position_size': None,
-            'risk_per_trade': request.risk_per_trade,
+            "sma_short": request.sma_short,
+            "sma_medium": request.sma_medium,
+            "sma_long": request.sma_long,
+            "position_size": None,
+            "risk_per_trade": request.risk_per_trade,
         }
-        strategy = DollarTraderStrategy(params=strategy_params, strategy_id="DollarTrader")
+        strategy = DollarTraderStrategy(
+            params=strategy_params, strategy_id="DollarTrader"
+        )
 
         # 配置
         config = TradingConfig(
@@ -171,7 +176,7 @@ async def run_backtest(request: DollarTraderBacktestRequest):
 
         # 计算信号
         signals = []
-        warmup_bars = strategy.params['sma_long'] + 5
+        warmup_bars = strategy.params["sma_long"] + 5
         for i in range(warmup_bars, len(ohlc_df)):
             signal = strategy.generate_signal(ohlc_df, i)
             if signal:
@@ -183,24 +188,29 @@ async def run_backtest(request: DollarTraderBacktestRequest):
 
         # 构建响应
         equity_curve = [
-            EquityPoint(
-                timestamp=ts.isoformat(),
-                equity=eq
-            )
+            EquityPoint(timestamp=ts.isoformat(), equity=eq)
             for ts, eq in zip(result.equity_timestamps, result.equity_curve)
         ]
 
         trades = [
             TradeRecord(
-                entry_time=t.entry_time.isoformat() if hasattr(t.entry_time, 'isoformat') else str(t.entry_time),
-                exit_time=t.exit_time.isoformat() if hasattr(t.exit_time, 'isoformat') else str(t.exit_time),
+                entry_time=(
+                    t.entry_time.isoformat()
+                    if hasattr(t.entry_time, "isoformat")
+                    else str(t.entry_time)
+                ),
+                exit_time=(
+                    t.exit_time.isoformat()
+                    if hasattr(t.exit_time, "isoformat")
+                    else str(t.exit_time)
+                ),
                 direction=t.direction.name,
                 entry_price=t.entry_price,
                 exit_price=t.exit_price,
                 pnl=t.pnl,
                 pnl_pct=t.pnl_pct * 100,
                 bars_held=t.bars_held,
-                exit_reason=t.exit_reason.name
+                exit_reason=t.exit_reason.name,
             )
             for t in result.trades
         ]
@@ -221,24 +231,24 @@ async def run_backtest(request: DollarTraderBacktestRequest):
             sharpe_ratio=result.sharpe_ratio,
             sortino_ratio=result.sortino_ratio,
             calmar_ratio=result.calmar_ratio,
-            long_trades=result.strategy_stats.get('long_trades', 0),
-            short_trades=result.strategy_stats.get('short_trades', 0),
-            signal_exits=result.strategy_stats.get('signal_exits', 0),
-            final_capital=result.final_capital
+            long_trades=result.strategy_stats.get("long_trades", 0),
+            short_trades=result.strategy_stats.get("short_trades", 0),
+            signal_exits=result.strategy_stats.get("signal_exits", 0),
+            final_capital=result.final_capital,
         )
 
         return DollarTraderBacktestResponse(
             success=True,
             result=backtest_result,
             equity_curve=equity_curve,
-            trades=trades
+            trades=trades,
         )
 
     except Exception as e:
         logger.error(f"Backtest failed: {e}", exc_info=True)
         return DollarTraderBacktestResponse(
             success=False,
-            error="Internal server error. Please check your parameters and try again."
+            error="Internal server error. Please check your parameters and try again.",
         )
 
 
@@ -247,12 +257,12 @@ async def get_default_params():
     """获取美元策略默认参数"""
     strategy = DollarTraderStrategy()
     return {
-        "sma_short": strategy.params.get('sma_short', 20),
-        "sma_medium": strategy.params.get('sma_medium', 50),
-        "sma_long": strategy.params.get('sma_long', 200),
-        "risk_per_trade": strategy.params.get('risk_per_trade', 0.02),
-        "position_size": strategy.params.get('position_size', 1.0),
-        "param_bounds": strategy.get_param_bounds()
+        "sma_short": strategy.params.get("sma_short", 20),
+        "sma_medium": strategy.params.get("sma_medium", 50),
+        "sma_long": strategy.params.get("sma_long", 200),
+        "risk_per_trade": strategy.params.get("risk_per_trade", 0.02),
+        "position_size": strategy.params.get("position_size", 1.0),
+        "param_bounds": strategy.get_param_bounds(),
     }
 
 
@@ -265,20 +275,20 @@ async def get_presets():
             "sma_medium": 50,
             "sma_long": 200,
             "risk_per_trade": 0.01,
-            "description": "保守配置 - 较低风险，较大止损"
+            "description": "保守配置 - 较低风险，较大止损",
         },
         "balanced": {
             "sma_short": 15,
             "sma_medium": 40,
             "sma_long": 150,
             "risk_per_trade": 0.02,
-            "description": "平衡配置 - 标准SMA参数"
+            "description": "平衡配置 - 标准SMA参数",
         },
         "aggressive": {
             "sma_short": 10,
             "sma_medium": 30,
             "sma_long": 100,
             "risk_per_trade": 0.03,
-            "description": "激进配置 - 更快响应，更高风险"
-        }
+            "description": "激进配置 - 更快响应，更高风险",
+        },
     }

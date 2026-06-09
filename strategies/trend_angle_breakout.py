@@ -57,34 +57,31 @@ class TrendAngleBreakoutStrategy(BaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         """返回默认参数"""
         return {
-            'sma_period': 20,
-            'angle_lookback': 5,
-            'angle_threshold': 3.0,
-            'breakout_lookback': 2,
-            'use_fixed_exit': True,
-            'risk_reward_ratio': 2.0,
-            'trailing_stop_atr': 2.0,
-            'atr_period': 14,
-            'position_size': 1.0,
+            "sma_period": 20,
+            "angle_lookback": 5,
+            "angle_threshold": 3.0,
+            "breakout_lookback": 2,
+            "use_fixed_exit": True,
+            "risk_reward_ratio": 2.0,
+            "trailing_stop_atr": 2.0,
+            "atr_period": 14,
+            "position_size": 1.0,
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """返回参数优化范围"""
         return {
-            'sma_period': (10, 50),
-            'angle_lookback': (3, 10),
-            'angle_threshold': (1.0, 10.0),
-            'breakout_lookback': (1, 10),  # 扩大范围到10根K线
-            'risk_reward_ratio': (1.0, 4.0),
-            'trailing_stop_atr': (1.0, 4.0),
-            'atr_period': (10, 20),
+            "sma_period": (10, 50),
+            "angle_lookback": (3, 10),
+            "angle_threshold": (1.0, 10.0),
+            "breakout_lookback": (1, 10),  # 扩大范围到10根K线
+            "risk_reward_ratio": (1.0, 4.0),
+            "trailing_stop_atr": (1.0, 4.0),
+            "atr_period": (10, 20),
         }
 
     def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        **kwargs
+        self, df: pd.DataFrame, current_idx: int, **kwargs
     ) -> Optional[TradeSignal]:
         """
         生成交易信号
@@ -98,11 +95,14 @@ class TrendAngleBreakoutStrategy(BaseStrategy):
             TradeSignal对象或None
         """
         # 检查数据充足性
-        min_bars_needed = max(
-            self.params['sma_period'] + self.params['angle_lookback'],
-            self.params['breakout_lookback'] + 1,
-            self.params['atr_period']
-        ) + 5
+        min_bars_needed = (
+            max(
+                self.params["sma_period"] + self.params["angle_lookback"],
+                self.params["breakout_lookback"] + 1,
+                self.params["atr_period"],
+            )
+            + 5
+        )
 
         if current_idx < min_bars_needed:
             return None
@@ -114,37 +114,41 @@ class TrendAngleBreakoutStrategy(BaseStrategy):
         # 检查必要的指标列是否存在
         sma_col = f"SMA_{self.params['sma_period']}"
         if sma_col not in df.columns:
-            raise ValueError(f"Missing required column: {sma_col}. Please ensure SMA is calculated.")
-        if 'ATR' not in df.columns:
-            raise ValueError("Missing required column: ATR. Please ensure ATR is calculated.")
+            raise ValueError(
+                f"Missing required column: {sma_col}. Please ensure SMA is calculated."
+            )
+        if "ATR" not in df.columns:
+            raise ValueError(
+                "Missing required column: ATR. Please ensure ATR is calculated."
+            )
 
         # 获取当前SMA角度
-        sma_angle = current_bar.get('SMA_Angle', None)
+        sma_angle = current_bar.get("SMA_Angle", None)
         if pd.isna(sma_angle):
             return None
 
         # 计算前N根K线的高低点（不含当前K线）
-        lookback = int(self.params['breakout_lookback'])
+        lookback = int(self.params["breakout_lookback"])
         start_idx = current_idx - lookback
         end_idx = current_idx  # 不包含当前K线
 
-        recent_highs = df['High'].iloc[start_idx:end_idx]
-        recent_lows = df['Low'].iloc[start_idx:end_idx]
+        recent_highs = df["High"].iloc[start_idx:end_idx]
+        recent_lows = df["Low"].iloc[start_idx:end_idx]
 
         highest_2 = recent_highs.max()
         lowest_2 = recent_lows.min()
 
         # 当前价格
-        current_close = current_bar['Close']
-        current_high = current_bar['High']
-        current_low = current_bar['Low']
+        current_close = current_bar["Close"]
+        current_high = current_bar["High"]
+        current_low = current_bar["Low"]
 
         # 获取ATR用于计算止损
-        atr = current_bar['ATR']
+        atr = current_bar["ATR"]
         if pd.isna(atr) or atr <= 0:
             return None
 
-        angle_threshold = self.params['angle_threshold']
+        angle_threshold = self.params["angle_threshold"]
 
         # 生成信号逻辑
         signal = None
@@ -163,26 +167,31 @@ class TrendAngleBreakoutStrategy(BaseStrategy):
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,  # 下一根K线执行（避免前视偏差）
                     sma_angle=sma_angle,
-                    breakout_level=highest_2
+                    breakout_level=highest_2,
                 )
                 self.current_position = TradeDirection.LONG
             elif self.current_position is None:
                 # 新开多仓
-                stop_loss = current_close - atr * self.params['trailing_stop_atr']
-                take_profit = current_close + atr * self.params['risk_reward_ratio'] * self.params['trailing_stop_atr']
+                stop_loss = current_close - atr * self.params["trailing_stop_atr"]
+                take_profit = (
+                    current_close
+                    + atr
+                    * self.params["risk_reward_ratio"]
+                    * self.params["trailing_stop_atr"]
+                )
 
                 signal = self._create_signal(
                     timestamp=df.index[current_idx],
                     direction=TradeDirection.LONG,
                     entry_price=current_close,
-                    stop_loss=stop_loss if self.params['use_fixed_exit'] else None,
-                    take_profit=take_profit if self.params['use_fixed_exit'] else None,
+                    stop_loss=stop_loss if self.params["use_fixed_exit"] else None,
+                    take_profit=take_profit if self.params["use_fixed_exit"] else None,
                     reason=f"Long: Angle={sma_angle:.1f}°>{angle_threshold}°, Breakout>{highest_2:.2f}",
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
                     sma_angle=sma_angle,
                     breakout_level=highest_2,
-                    atr=atr
+                    atr=atr,
                 )
                 self.current_position = TradeDirection.LONG
 
@@ -200,26 +209,31 @@ class TrendAngleBreakoutStrategy(BaseStrategy):
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
                     sma_angle=sma_angle,
-                    breakout_level=lowest_2
+                    breakout_level=lowest_2,
                 )
                 self.current_position = TradeDirection.SHORT
             elif self.current_position is None:
                 # 新开空仓
-                stop_loss = current_close + atr * self.params['trailing_stop_atr']
-                take_profit = current_close - atr * self.params['risk_reward_ratio'] * self.params['trailing_stop_atr']
+                stop_loss = current_close + atr * self.params["trailing_stop_atr"]
+                take_profit = (
+                    current_close
+                    - atr
+                    * self.params["risk_reward_ratio"]
+                    * self.params["trailing_stop_atr"]
+                )
 
                 signal = self._create_signal(
                     timestamp=df.index[current_idx],
                     direction=TradeDirection.SHORT,
                     entry_price=current_close,
-                    stop_loss=stop_loss if self.params['use_fixed_exit'] else None,
-                    take_profit=take_profit if self.params['use_fixed_exit'] else None,
+                    stop_loss=stop_loss if self.params["use_fixed_exit"] else None,
+                    take_profit=take_profit if self.params["use_fixed_exit"] else None,
                     reason=f"Short: Angle={sma_angle:.1f}°<-{angle_threshold}°, Breakdown<{lowest_2:.2f}",
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
                     sma_angle=sma_angle,
                     breakout_level=lowest_2,
-                    atr=atr
+                    atr=atr,
                 )
                 self.current_position = TradeDirection.SHORT
 
@@ -233,7 +247,11 @@ class TrendAngleBreakoutStrategy(BaseStrategy):
             trade_record: 交易记录
         """
         # 当持仓被平仓时，重置当前持仓状态
-        if trade_record.get('exit_reason') in ['STOP_LOSS', 'TAKE_PROFIT', 'TRAILING_STOP']:
+        if trade_record.get("exit_reason") in [
+            "STOP_LOSS",
+            "TAKE_PROFIT",
+            "TRAILING_STOP",
+        ]:
             self.current_position = None
 
     def reset(self):
@@ -246,7 +264,7 @@ def calculate_strategy_indicators(
     df: pd.DataFrame,
     sma_period: int = 20,
     atr_period: int = 14,
-    angle_lookback: int = 5
+    angle_lookback: int = 5,
 ) -> pd.DataFrame:
     """
     计算策略所需的所有指标
@@ -264,16 +282,14 @@ def calculate_strategy_indicators(
 
     # 计算SMA
     sma_col = f"SMA_{sma_period}"
-    result[sma_col] = calculate_sma(result['Close'], sma_period)
+    result[sma_col] = calculate_sma(result["Close"], sma_period)
 
     # 计算ATR
-    result['ATR'] = calculate_atr(result, atr_period)
+    result["ATR"] = calculate_atr(result, atr_period)
 
     # 计算SMA角度（ATR标准化）
-    result['SMA_Angle'] = calculate_sma_angle(
-        result[sma_col],
-        result['ATR'],
-        angle_lookback
+    result["SMA_Angle"] = calculate_sma_angle(
+        result[sma_col], result["ATR"], angle_lookback
     )
 
     return result

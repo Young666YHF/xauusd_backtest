@@ -27,7 +27,10 @@ Dollar Trader Martingale BBW 增强策略 (阶梯式马丁)
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 
-from strategies.dollar_trader_base import DollarTraderBaseStrategy, calculate_dollar_trader_base_indicators
+from strategies.dollar_trader_base import (
+    DollarTraderBaseStrategy,
+    calculate_dollar_trader_base_indicators,
+)
 from core.types import TradeSignal, TradeDirection, SignalType, ExitReason
 from core.indicators import calculate_sma, calculate_bollinger_bands, calculate_bbw
 
@@ -81,37 +84,37 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         """返回默认参数"""
         return {
-            'sma_short': 20,
-            'sma_medium': 50,
-            'sma_long': 200,
-            'position_size': 0.01,  # 基础仓位（0.01手）
-            'martingale_multiplier': 2.0,  # 马丁格尔倍数
-            'max_martingale_steps': 5,  # 最大阶梯层级
-            'bb_period': 20,  # 布林带周期
-            'bb_std': 2.0,  # 布林带标准差倍数
-            'bbw_ma_period': 50,  # BBW均线周期
-            'enable_overshoot': True,  # 启用超调计数（默认开启）
-            'enable_undershoot': True,  # 启用欠调计数（默认开启）
+            "sma_short": 20,
+            "sma_medium": 50,
+            "sma_long": 200,
+            "position_size": 0.01,  # 基础仓位（0.01手）
+            "martingale_multiplier": 2.0,  # 马丁格尔倍数
+            "max_martingale_steps": 5,  # 最大阶梯层级
+            "bb_period": 20,  # 布林带周期
+            "bb_std": 2.0,  # 布林带标准差倍数
+            "bbw_ma_period": 50,  # BBW均线周期
+            "enable_overshoot": True,  # 启用超调计数（默认开启）
+            "enable_undershoot": True,  # 启用欠调计数（默认开启）
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """返回参数优化范围（布尔开关不提供边界）"""
         return {
-            'sma_short': (10, 30),
-            'sma_medium': (30, 70),
-            'sma_long': (100, 300),
-            'martingale_multiplier': (1.5, 3.0),
-            'max_martingale_steps': (3, 8),
-            'bb_period': (10, 30),
-            'bb_std': (1.5, 3.0),
-            'bbw_ma_period': (30, 100),
+            "sma_short": (10, 30),
+            "sma_medium": (30, 70),
+            "sma_long": (100, 300),
+            "martingale_multiplier": (1.5, 3.0),
+            "max_martingale_steps": (3, 8),
+            "bb_period": (10, 30),
+            "bb_std": (1.5, 3.0),
+            "bbw_ma_period": (30, 100),
         }
 
     def _calculate_position_size(self) -> float:
         """计算当前仓位大小"""
-        base_size = self.params['position_size']
-        multiplier = self.params['martingale_multiplier']
-        return base_size * (multiplier ** self.martingale_step)
+        base_size = self.params["position_size"]
+        multiplier = self.params["martingale_multiplier"]
+        return base_size * (multiplier**self.martingale_step)
 
     @property
     def current_position_size(self) -> float:
@@ -131,11 +134,11 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
         Args:
             trade_record: 交易记录
         """
-        profit = trade_record.get('profit', 0)
+        profit = trade_record.get("profit", 0)
         self.last_trade_profit = profit
-        max_steps = self.params['max_martingale_steps']
-        enable_overshoot = self.params.get('enable_overshoot', True)
-        enable_undershoot = self.params.get('enable_undershoot', True)
+        max_steps = self.params["max_martingale_steps"]
+        enable_overshoot = self.params.get("enable_overshoot", True)
+        enable_undershoot = self.params.get("enable_undershoot", True)
 
         if profit < 0:
             # ========== 亏损处理 ==========
@@ -169,7 +172,11 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
                 # 正常下降阶梯
                 self.martingale_step -= 1
                 # 如果下降后还有欠调计数且启用，消耗一个
-                if enable_undershoot and self.undershoot_count > 0 and self.martingale_step == 0:
+                if (
+                    enable_undershoot
+                    and self.undershoot_count > 0
+                    and self.martingale_step == 0
+                ):
                     self.undershoot_count -= 1
             else:
                 # 已经在0层
@@ -179,10 +186,7 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
                 # 如果未启用欠调，不做任何操作
 
     def _check_entry_filters(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        prev_bar: pd.Series
+        self, df: pd.DataFrame, current_idx: int, prev_bar: pd.Series
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         检查BBW是否满足开仓条件
@@ -195,7 +199,7 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
         Returns:
             (是否允许开仓, 附加信息字典)
         """
-        bbw_col = 'BBW'
+        bbw_col = "BBW"
         bbw_ma_col = f"BBW_MA_{self.params['bbw_ma_period']}"
 
         # 确保BBW列存在
@@ -214,17 +218,26 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
         # bbwAllowEntry = not na(prevBBW) and not na(prevBBW_MA) and (prevBBW > prevBBW_MA)
         if pd.notna(bbw_value) and pd.notna(bbw_ma):
             allow_entry = bbw_value > bbw_ma
-            return allow_entry, {'BBW': bbw_value, 'BBW_MA': bbw_ma, 'Step': self.martingale_step}
+            return allow_entry, {
+                "BBW": bbw_value,
+                "BBW_MA": bbw_ma,
+                "Step": self.martingale_step,
+            }
 
         # 数据无效，拒绝开仓（与Pine一致）
         return False, {}
 
-    def _validate_data(self, df: pd.DataFrame, current_idx: int) -> Optional[Tuple[str, str, str]]:
+    def _validate_data(
+        self, df: pd.DataFrame, current_idx: int
+    ) -> Optional[Tuple[str, str, str]]:
         """验证数据充足性（考虑BBW需要额外数据）"""
-        min_bars_needed = max(
-            self.params['sma_long'],
-            self.params['bb_period'] + self.params['bbw_ma_period']
-        ) + 5
+        min_bars_needed = (
+            max(
+                self.params["sma_long"],
+                self.params["bb_period"] + self.params["bbw_ma_period"],
+            )
+            + 5
+        )
 
         if current_idx < min_bars_needed:
             return None
@@ -246,7 +259,11 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
         self._update_martingale_state(trade_record)
 
         # 当持仓被平仓时，重置当前持仓状态
-        if trade_record.get('exit_reason') in [ExitReason.SIGNAL_REVERSE, ExitReason.FORCE_CLOSE, ExitReason.END_OF_DATA]:
+        if trade_record.get("exit_reason") in [
+            ExitReason.SIGNAL_REVERSE,
+            ExitReason.FORCE_CLOSE,
+            ExitReason.END_OF_DATA,
+        ]:
             self.current_position = None
 
     def reset(self):
@@ -278,16 +295,16 @@ class DollarTraderMartingaleBBWStepStrategy(DollarTraderBaseStrategy):
             状态字典
         """
         return {
-            'martingale_step': self.martingale_step,
-            'current_position_size': self.current_position_size,
-            'loss_count_in_step': self.loss_count_in_step,
-            'overshoot_count': self.overshoot_count,
-            'undershoot_count': self.undershoot_count,
-            'enable_overshoot': self.params.get('enable_overshoot', True),
-            'enable_undershoot': self.params.get('enable_undershoot', True),
-            'last_bbw_value': self.last_bbw_value,
-            'last_bbw_ma': self.last_bbw_ma,
-            'last_trade_profit': self.last_trade_profit,
+            "martingale_step": self.martingale_step,
+            "current_position_size": self.current_position_size,
+            "loss_count_in_step": self.loss_count_in_step,
+            "overshoot_count": self.overshoot_count,
+            "undershoot_count": self.undershoot_count,
+            "enable_overshoot": self.params.get("enable_overshoot", True),
+            "enable_undershoot": self.params.get("enable_undershoot", True),
+            "last_bbw_value": self.last_bbw_value,
+            "last_bbw_ma": self.last_bbw_ma,
+            "last_trade_profit": self.last_trade_profit,
         }
 
 
@@ -298,7 +315,7 @@ def calculate_dollar_trader_martingale_bbw_indicators(
     sma_long: int = 200,
     bb_period: int = 20,
     bb_std: float = 2.0,
-    bbw_ma_period: int = 50
+    bbw_ma_period: int = 50,
 ) -> pd.DataFrame:
     """
     计算Dollar Trader Martingale BBW策略所需的所有指标
@@ -315,20 +332,22 @@ def calculate_dollar_trader_martingale_bbw_indicators(
     Returns:
         添加指标后的DataFrame
     """
-    result = calculate_dollar_trader_base_indicators(df, sma_short, sma_medium, sma_long)
+    result = calculate_dollar_trader_base_indicators(
+        df, sma_short, sma_medium, sma_long
+    )
 
     # 计算布林带
     bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(
-        result['Close'], bb_period, bb_std
+        result["Close"], bb_period, bb_std
     )
-    result['BB_Upper'] = bb_upper
-    result['BB_Middle'] = bb_middle
-    result['BB_Lower'] = bb_lower
+    result["BB_Upper"] = bb_upper
+    result["BB_Middle"] = bb_middle
+    result["BB_Lower"] = bb_lower
 
     # 计算BBW
-    result['BBW'] = calculate_bbw(result['Close'], bb_period, bb_std)
+    result["BBW"] = calculate_bbw(result["Close"], bb_period, bb_std)
 
     # 计算BBW的移动平均
-    result[f'BBW_MA_{bbw_ma_period}'] = calculate_sma(result['BBW'], bbw_ma_period)
+    result[f"BBW_MA_{bbw_ma_period}"] = calculate_sma(result["BBW"], bbw_ma_period)
 
     return result

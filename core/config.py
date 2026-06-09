@@ -19,14 +19,19 @@ class TradingConfig(BaseModel):
     2. config.yaml 配置文件
     3. 代码默认值（本类中定义）
     """
+
     # 品种配置
     symbol: str = Field(default="XAUUSD", description="交易品种代码")
     contract_size: int = Field(default=100, description="合约大小（盎司/手）")
     tick_size: float = Field(default=0.01, description="最小价格变动")
 
     # 成本配置
-    spread_per_ounce: float = Field(default=0.6, description="每盎司点差（美元）- 使得每0.01手往返成本=0.6美元")
-    commission_per_lot: float = Field(default=0.0, description="每手单边佣金（已包含在点差中）")
+    spread_per_ounce: float = Field(
+        default=0.6, description="每盎司点差（美元）- 使得每0.01手往返成本=0.6美元"
+    )
+    commission_per_lot: float = Field(
+        default=0.0, description="每手单边佣金（已包含在点差中）"
+    )
 
     # 资金配置
     initial_capital: float = Field(default=100000.0, description="初始资金")
@@ -50,6 +55,7 @@ class TradingConfig(BaseModel):
 
 class StrategyConfig(BaseModel):
     """策略参数配置"""
+
     # 基础指标参数
     bb_period: int = Field(default=20, ge=5, le=50, description="布林带周期")
     bb_std: float = Field(default=2.0, ge=0.5, le=5.0, description="布林带标准差")
@@ -61,45 +67,69 @@ class StrategyConfig(BaseModel):
     # 策略A参数（均值回归）
     rsi_oversold: int = Field(default=25, ge=5, le=50, description="RSI超卖阈值")
     rsi_overbought: int = Field(default=75, ge=50, le=95, description="RSI超买阈值")
-    stop_loss_atr_mult_a: float = Field(default=1.0, ge=0.1, le=5.0, description="策略A止损ATR倍数")
-    max_hold_bars_a: int = Field(default=5, ge=1, le=50, description="策略A最大持仓K线数")
+    stop_loss_atr_mult_a: float = Field(
+        default=1.0, ge=0.1, le=5.0, description="策略A止损ATR倍数"
+    )
+    max_hold_bars_a: int = Field(
+        default=5, ge=1, le=50, description="策略A最大持仓K线数"
+    )
 
     # 策略B参数（动量突破）
     ema_fast: int = Field(default=20, ge=5, le=100, description="快速EMA周期")
     ema_slow: int = Field(default=50, ge=10, le=200, description="慢速EMA周期")
-    stop_loss_atr_mult_b: float = Field(default=1.2, ge=0.1, le=5.0, description="策略B止损ATR倍数")
-    trailing_stop_atr_mult: float = Field(default=2.5, ge=0.5, le=10.0, description="追踪止损ATR倍数")
+    stop_loss_atr_mult_b: float = Field(
+        default=1.2, ge=0.1, le=5.0, description="策略B止损ATR倍数"
+    )
+    trailing_stop_atr_mult: float = Field(
+        default=2.5, ge=0.5, le=10.0, description="追踪止损ATR倍数"
+    )
 
     # 波动率过滤
-    squeeze_threshold: float = Field(default=0.8, ge=0.1, le=2.0, description="挤压阈值")
-    volatility_filter_period: int = Field(default=20, ge=5, le=100, description="波动率过滤周期")
-    volatility_filter_mult: float = Field(default=1.5, ge=0.5, le=5.0, description="波动率过滤倍数")
+    squeeze_threshold: float = Field(
+        default=0.8, ge=0.1, le=2.0, description="挤压阈值"
+    )
+    volatility_filter_period: int = Field(
+        default=20, ge=5, le=100, description="波动率过滤周期"
+    )
+    volatility_filter_mult: float = Field(
+        default=1.5, ge=0.5, le=5.0, description="波动率过滤倍数"
+    )
 
     # ATR自适应时间止损
-    atr_time_stop_base: float = Field(default=4.0, ge=1.0, le=20.0, description="时间止损基础K线数")
-    atr_time_stop_mult: float = Field(default=0.5, ge=0.1, le=2.0, description="时间止损ATR倍数")
+    atr_time_stop_base: float = Field(
+        default=4.0, ge=1.0, le=20.0, description="时间止损基础K线数"
+    )
+    atr_time_stop_mult: float = Field(
+        default=0.5, ge=0.1, le=2.0, description="时间止损ATR倍数"
+    )
 
     # 假突破过滤
-    pullback_confirmation_bars: int = Field(default=2, ge=0, le=10, description="回踩确认K线数")
-    ema_momentum_threshold: float = Field(default=0.0005, ge=0.0001, le=0.01, description="EMA动量阈值")
+    pullback_confirmation_bars: int = Field(
+        default=2, ge=0, le=10, description="回踩确认K线数"
+    )
+    ema_momentum_threshold: float = Field(
+        default=0.0005, ge=0.0001, le=0.01, description="EMA动量阈值"
+    )
 
     # 策略B入场模式
-    strategy_b_mode: Literal[0, 1] = Field(default=0, description="策略B入场模式：0=自动，1=强制回踩")
+    strategy_b_mode: Literal[0, 1] = Field(
+        default=0, description="策略B入场模式：0=自动，1=强制回踩"
+    )
 
-    @field_validator('ema_slow')
+    @field_validator("ema_slow")
     @classmethod
     def validate_ema_slow(cls, v: int, info) -> int:
         """验证EMA慢线大于快线"""
-        if 'ema_fast' in info.data and v <= info.data['ema_fast']:
-            raise ValueError('ema_slow must be greater than ema_fast')
+        if "ema_fast" in info.data and v <= info.data["ema_fast"]:
+            raise ValueError("ema_slow must be greater than ema_fast")
         return v
 
-    @field_validator('rsi_overbought')
+    @field_validator("rsi_overbought")
     @classmethod
     def validate_rsi(cls, v: int, info) -> int:
         """验证RSI超买大于超卖"""
-        if 'rsi_oversold' in info.data and v <= info.data['rsi_oversold']:
-            raise ValueError('rsi_overbought must be greater than rsi_oversold')
+        if "rsi_oversold" in info.data and v <= info.data["rsi_oversold"]:
+            raise ValueError("rsi_overbought must be greater than rsi_oversold")
         return v
 
     def to_dict(self) -> Dict[str, Any]:
@@ -109,32 +139,33 @@ class StrategyConfig(BaseModel):
     def to_optimized_params(self) -> Dict[str, Tuple[float, float]]:
         """获取可优化参数范围"""
         return {
-            'bb_period': (15, 25),
-            'bb_std': (1.8, 2.5),
-            'kc_period': (15, 25),
-            'kc_atr_mult': (1.2, 2.0),
-            'atr_period': (10, 18),
-            'rsi_period': (10, 18),
-            'rsi_oversold': (15, 35),
-            'rsi_overbought': (65, 85),
-            'stop_loss_atr_mult_a': (0.8, 1.5),
-            'max_hold_bars_a': (3, 10),
-            'ema_fast': (12, 30),
-            'ema_slow': (35, 70),
-            'stop_loss_atr_mult_b': (1.0, 2.0),
-            'trailing_stop_atr_mult': (2.0, 4.0),
-            'squeeze_threshold': (0.6, 1.0),
-            'atr_time_stop_base': (2.0, 6.0),
-            'atr_time_stop_mult': (0.3, 0.8),
-            'volatility_filter_period': (15, 30),
-            'volatility_filter_mult': (1.2, 2.0),
-            'pullback_confirmation_bars': (1, 4),
-            'ema_momentum_threshold': (0.0003, 0.001),
+            "bb_period": (15, 25),
+            "bb_std": (1.8, 2.5),
+            "kc_period": (15, 25),
+            "kc_atr_mult": (1.2, 2.0),
+            "atr_period": (10, 18),
+            "rsi_period": (10, 18),
+            "rsi_oversold": (15, 35),
+            "rsi_overbought": (65, 85),
+            "stop_loss_atr_mult_a": (0.8, 1.5),
+            "max_hold_bars_a": (3, 10),
+            "ema_fast": (12, 30),
+            "ema_slow": (35, 70),
+            "stop_loss_atr_mult_b": (1.0, 2.0),
+            "trailing_stop_atr_mult": (2.0, 4.0),
+            "squeeze_threshold": (0.6, 1.0),
+            "atr_time_stop_base": (2.0, 6.0),
+            "atr_time_stop_mult": (0.3, 0.8),
+            "volatility_filter_period": (15, 30),
+            "volatility_filter_mult": (1.2, 2.0),
+            "pullback_confirmation_bars": (1, 4),
+            "ema_momentum_threshold": (0.0003, 0.001),
         }
 
 
 class DataConfig(BaseModel):
     """数据配置"""
+
     # 数据源配置
     data_dir: str = Field(default="/home/ctyun/xauusd_data", description="数据目录")
     interval: str = Field(default="15min", description="K线周期")
@@ -149,6 +180,7 @@ class DataConfig(BaseModel):
 
 class OptimizationConfig(BaseModel):
     """优化配置"""
+
     # Optuna配置
     n_trials: int = Field(default=300, ge=10, le=10000, description="优化试验次数")
     timeout: Optional[int] = Field(default=None, description="超时时间（秒）")
@@ -159,8 +191,9 @@ class OptimizationConfig(BaseModel):
     patience: int = Field(default=50, ge=10, le=500, description="早停耐心值")
 
     # 优化目标
-    optimization_target: Literal['sharpe', 'calmar', 'profit_factor', 'win_rate', 'custom'] = \
-        Field(default='calmar', description="优化目标")
+    optimization_target: Literal[
+        "sharpe", "calmar", "profit_factor", "win_rate", "custom"
+    ] = Field(default="calmar", description="优化目标")
 
     # 约束条件
     min_trades: int = Field(default=30, ge=5, le=1000, description="最小交易次数")
@@ -173,6 +206,7 @@ class OptimizationConfig(BaseModel):
 
 class Config(BaseModel):
     """全局配置"""
+
     trading: TradingConfig = Field(default_factory=TradingConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     data: DataConfig = Field(default_factory=DataConfig)
@@ -188,10 +222,10 @@ class Config(BaseModel):
         if not path.exists():
             raise FileNotFoundError(f"Config file not found: {filepath}")
 
-        with open(path, 'r', encoding='utf-8') as f:
-            if path.suffix in ['.yaml', '.yml']:
+        with open(path, "r", encoding="utf-8") as f:
+            if path.suffix in [".yaml", ".yml"]:
                 data = yaml.safe_load(f)
-            elif path.suffix == '.json':
+            elif path.suffix == ".json":
                 data = json.load(f)
             else:
                 raise ValueError(f"Unsupported config format: {path.suffix}")
@@ -203,11 +237,13 @@ class Config(BaseModel):
         path = Path(filepath)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(path, 'w', encoding='utf-8') as f:
-            if path.suffix == '.json':
+        with open(path, "w", encoding="utf-8") as f:
+            if path.suffix == ".json":
                 json.dump(self.model_dump(), f, indent=2, ensure_ascii=False)
             else:
-                yaml.dump(self.model_dump(), f, allow_unicode=True, default_flow_style=False)
+                yaml.dump(
+                    self.model_dump(), f, allow_unicode=True, default_flow_style=False
+                )
 
     def get_param_bounds(self) -> Dict[str, Tuple[float, float]]:
         """获取参数优化范围"""

@@ -27,15 +27,19 @@ class MeanReversionStrategy(BaseStrategy):
     核心指标：布林带、RSI、VWAP
     """
 
-    def __init__(self, params: Optional[Dict[str, Any]] = None, strategy_id: str = "MeanReversion"):
+    def __init__(
+        self,
+        params: Optional[Dict[str, Any]] = None,
+        strategy_id: str = "MeanReversion",
+    ):
         super().__init__(params, strategy_id)
 
         # 提取常用参数为局部变量以提高性能
-        self.rsi_oversold = self.params.get('rsi_oversold', 25)
-        self.rsi_overbought = self.params.get('rsi_overbought', 75)
-        self.stop_loss_mult = self.params.get('stop_loss_atr_mult_a', 1.0)
-        self.max_hold_bars = self.params.get('max_hold_bars_a', 5)
-        self.use_vwap_exit = self.params.get('use_vwap_exit', True)
+        self.rsi_oversold = self.params.get("rsi_oversold", 25)
+        self.rsi_overbought = self.params.get("rsi_overbought", 75)
+        self.stop_loss_mult = self.params.get("stop_loss_atr_mult_a", 1.0)
+        self.max_hold_bars = self.params.get("max_hold_bars_a", 5)
+        self.use_vwap_exit = self.params.get("use_vwap_exit", True)
 
         # 从全局配置读取交易时段（北京时间）
         config = get_config()
@@ -45,36 +49,33 @@ class MeanReversionStrategy(BaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         """获取默认参数"""
         return {
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'rsi_period': 14,
-            'rsi_oversold': 25,
-            'rsi_overbought': 75,
-            'atr_period': 14,
-            'stop_loss_atr_mult_a': 1.0,
-            'max_hold_bars_a': 5,
-            'volatility_filter_period': 20,
-            'volatility_filter_mult': 1.5,
-            'use_vwap_exit': True,
+            "bb_period": 20,
+            "bb_std": 2.0,
+            "rsi_period": 14,
+            "rsi_oversold": 25,
+            "rsi_overbought": 75,
+            "atr_period": 14,
+            "stop_loss_atr_mult_a": 1.0,
+            "max_hold_bars_a": 5,
+            "volatility_filter_period": 20,
+            "volatility_filter_mult": 1.5,
+            "use_vwap_exit": True,
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """获取参数优化范围"""
         return {
-            'bb_period': (15, 25),
-            'bb_std': (1.5, 2.5),
-            'rsi_oversold': (15, 35),
-            'rsi_overbought': (65, 85),
-            'stop_loss_atr_mult_a': (0.5, 2.0),
-            'max_hold_bars_a': (3, 10),
-            'volatility_filter_mult': (1.0, 2.5),
+            "bb_period": (15, 25),
+            "bb_std": (1.5, 2.5),
+            "rsi_oversold": (15, 35),
+            "rsi_overbought": (65, 85),
+            "stop_loss_atr_mult_a": (0.5, 2.0),
+            "max_hold_bars_a": (3, 10),
+            "volatility_filter_mult": (1.0, 2.5),
         }
 
     def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        **kwargs
+        self, df: pd.DataFrame, current_idx: int, **kwargs
     ) -> Optional[TradeSignal]:
         """
         生成交易信号
@@ -102,17 +103,17 @@ class MeanReversionStrategy(BaseStrategy):
             return None
 
         # 获取价格数据
-        close = current_bar['Close']
-        atr = current_bar.get('ATR', 0)
-        rsi = current_bar.get('RSI', 50)
-        bb_upper = current_bar.get('BB_Upper', close)
-        bb_lower = current_bar.get('BB_Lower', close)
-        vwap = current_bar.get('VWAP', close)
+        close = current_bar["Close"]
+        atr = current_bar.get("ATR", 0)
+        rsi = current_bar.get("RSI", 50)
+        bb_upper = current_bar.get("BB_Upper", close)
+        bb_lower = current_bar.get("BB_Lower", close)
+        vwap = current_bar.get("VWAP", close)
 
         # 获取前一根K线数据（避免前视偏差）
         prev_bar = df.iloc[current_idx - 1]
-        prev_close = prev_bar['Close']
-        prev_rsi = prev_bar.get('RSI', 50)
+        prev_close = prev_bar["Close"]
+        prev_rsi = prev_bar.get("RSI", 50)
 
         # ========== 做多信号 ==========
         # 条件：价格触及布林带下轨 + RSI从超卖区回升
@@ -138,7 +139,7 @@ class MeanReversionStrategy(BaseStrategy):
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
                     max_hold_bars=self.max_hold_bars,
-                    vwap=vwap
+                    vwap=vwap,
                 )
 
         # ========== 做空信号 ==========
@@ -165,7 +166,7 @@ class MeanReversionStrategy(BaseStrategy):
                     signal_bar_idx=current_idx,
                     execution_bar_idx=current_idx + 1,
                     max_hold_bars=self.max_hold_bars,
-                    vwap=vwap
+                    vwap=vwap,
                 )
 
         return None
@@ -173,8 +174,8 @@ class MeanReversionStrategy(BaseStrategy):
     def _is_asian_session(self, timestamp) -> bool:
         """检查是否为亚盘时段（北京时间）"""
         # 数据索引为UTC时间，需转换为北京时间（UTC+8）
-        if hasattr(timestamp, 'tz') and timestamp.tz is not None:
-            ts_local = timestamp.tz_convert('Asia/Shanghai')
+        if hasattr(timestamp, "tz") and timestamp.tz is not None:
+            ts_local = timestamp.tz_convert("Asia/Shanghai")
         else:
             ts_local = timestamp
         hour = ts_local.hour
@@ -182,19 +183,19 @@ class MeanReversionStrategy(BaseStrategy):
 
     def _is_abnormal_volatility(self, df: pd.DataFrame, current_idx: int) -> bool:
         """检查是否出现异常波动"""
-        period = self.params.get('volatility_filter_period', 20)
-        mult = self.params.get('volatility_filter_mult', 1.5)
+        period = self.params.get("volatility_filter_period", 20)
+        mult = self.params.get("volatility_filter_mult", 1.5)
 
         if current_idx < period + 1:
             return False
 
         # 计算前N根K线的平均ATR
-        prev_atrs = df['ATR'].iloc[current_idx - period:current_idx]
+        prev_atrs = df["ATR"].iloc[current_idx - period : current_idx]
         avg_atr = prev_atrs.mean()
 
         # 当前K线的波动范围
         current_bar = df.iloc[current_idx]
-        current_range = current_bar['High'] - current_bar['Low']
+        current_range = current_bar["High"] - current_bar["Low"]
 
         # 如果当前波动显著高于历史平均，判定为异常
         if avg_atr > 0 and current_range > avg_atr * mult:

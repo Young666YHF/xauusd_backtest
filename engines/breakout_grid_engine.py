@@ -18,8 +18,12 @@ from datetime import datetime
 
 from engines.base import BaseBacktestEngine, ExecutionModel
 from core.types import (
-    TradeSignal, TradeRecord, TradeDirection,
-    ExitReason, BacktestResult, TickData
+    TradeSignal,
+    TradeRecord,
+    TradeDirection,
+    ExitReason,
+    BacktestResult,
+    TickData,
 )
 from core.config import TradingConfig
 from core.events import EventType
@@ -40,7 +44,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None,
         max_total_loss_pct: float = 0.05,
-        risk_manager=None
+        risk_manager=None,
     ):
         # 使用零佣金模型（点差成本在平仓时计算）
         if execution_model is None:
@@ -52,8 +56,12 @@ class BreakoutGridEngine(BaseBacktestEngine):
         self.max_total_loss_pct = max_total_loss_pct
 
         # 网格状态追踪
-        self.grid_positions: Dict[int, Dict[str, Any]] = {}  # level -> {direction, size, entry_price, tp_price}
-        self.pending_orders: Dict[int, Tuple[TradeDirection, float]] = {}  # level -> (direction, size)
+        self.grid_positions: Dict[int, Dict[str, Any]] = (
+            {}
+        )  # level -> {direction, size, entry_price, tp_price}
+        self.pending_orders: Dict[int, Tuple[TradeDirection, float]] = (
+            {}
+        )  # level -> (direction, size)
 
         # 统计信息
         self.long_entries = 0
@@ -88,7 +96,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
         df: pd.DataFrame,
         signals: List[TradeSignal] = None,
         tick_df: Optional[pd.DataFrame] = None,
-        strategy=None
+        strategy=None,
     ) -> BacktestResult:
         """
         执行网格策略回测
@@ -122,7 +130,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
             timestamp = df.index[i]
 
             # 获取当前价格
-            current_price = bar['Close']
+            current_price = bar["Close"]
 
             # 初始化策略（首次运行）
             if i == 0 and not strategy.is_initialized:
@@ -150,24 +158,36 @@ class BreakoutGridEngine(BaseBacktestEngine):
         if self._strategy is None:
             return
 
-        price = bar['Close']
-        tick_data = TickData(timestamp=timestamp, bid=price-0.05, ask=price+0.05)
+        price = bar["Close"]
+        tick_data = TickData(timestamp=timestamp, bid=price - 0.05, ask=price + 0.05)
         self._strategy.on_tick(tick_data, timestamp)
 
         # 同步策略的初始仓位到引擎
         if self._strategy.is_initialized:
             for level, grid in self._strategy.grids.items():
                 if grid.long_position > 0:
-                    tp_price = price + self._strategy.params.get('take_profit', 5.0)
-                    self._open_grid_position(level, TradeDirection.LONG, grid.long_position, price, tp_price, timestamp)
+                    tp_price = price + self._strategy.params.get("take_profit", 5.0)
+                    self._open_grid_position(
+                        level,
+                        TradeDirection.LONG,
+                        grid.long_position,
+                        price,
+                        tp_price,
+                        timestamp,
+                    )
                 elif grid.short_position > 0:
-                    tp_price = price - self._strategy.params.get('take_profit', 5.0)
-                    self._open_grid_position(level, TradeDirection.SHORT, grid.short_position, price, tp_price, timestamp)
+                    tp_price = price - self._strategy.params.get("take_profit", 5.0)
+                    self._open_grid_position(
+                        level,
+                        TradeDirection.SHORT,
+                        grid.short_position,
+                        price,
+                        tp_price,
+                        timestamp,
+                    )
 
     def _prepare_tick_mapping(
-        self,
-        tick_df: pd.DataFrame,
-        bar_timestamps: pd.DatetimeIndex
+        self, tick_df: pd.DataFrame, bar_timestamps: pd.DatetimeIndex
     ) -> Dict[int, Tuple[int, int]]:
         """准备Tick数据映射 - 使用高效的一次性遍历"""
         tick_times = tick_df.index
@@ -204,7 +224,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
         bar_idx: int,
         bar: pd.Series,
         timestamp: datetime,
-        bar_idx_to_ticks: Dict[int, Tuple[int, int]]
+        bar_idx_to_ticks: Dict[int, Tuple[int, int]],
     ):
         """处理单个bar内的所有tick"""
         if bar_idx not in bar_idx_to_ticks:
@@ -217,11 +237,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
         # 逐个处理tick
         for i in range(tick_start, tick_end):
             tick = self._tick_df.iloc[i]
-            tick_data = TickData(
-                timestamp=tick.name,
-                bid=tick['bid'],
-                ask=tick['ask']
-            )
+            tick_data = TickData(timestamp=tick.name, bid=tick["bid"], ask=tick["ask"])
 
             # 检查止盈
             self._check_take_profit(tick_data.mid, tick.name)
@@ -237,9 +253,9 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
     def _process_bar(self, bar: pd.Series, timestamp: datetime):
         """使用K线数据处理（简化模式）"""
-        price = bar['Close']
-        high = bar['High']
-        low = bar['Low']
+        price = bar["Close"]
+        high = bar["High"]
+        low = bar["Low"]
 
         # 检查止盈（使用高低价）
         self._check_take_profit_bar(bar, timestamp)
@@ -256,11 +272,15 @@ class BreakoutGridEngine(BaseBacktestEngine):
             triggered_signals = self._check_pending_orders_with_ohlc(bar, timestamp)
 
             for signal in triggered_signals:
-                mid_price = (bar['High'] + bar['Low']) / 2
-                tick_data = TickData(timestamp=timestamp, bid=mid_price-0.05, ask=mid_price+0.05)
+                mid_price = (bar["High"] + bar["Low"]) / 2
+                tick_data = TickData(
+                    timestamp=timestamp, bid=mid_price - 0.05, ask=mid_price + 0.05
+                )
                 self._execute_signal(signal, tick_data, timestamp)
 
-    def _check_global_stop_loss(self, current_price: float, timestamp: datetime) -> bool:
+    def _check_global_stop_loss(
+        self, current_price: float, timestamp: datetime
+    ) -> bool:
         """检查全局止损
 
         计算所有网格持仓的总未实现盈亏，当亏损超过账户权益的阈值时，
@@ -279,10 +299,18 @@ class BreakoutGridEngine(BaseBacktestEngine):
         # 计算总未实现盈亏
         total_unrealized_pnl = 0.0
         for level, pos in self.grid_positions.items():
-            if pos['direction'] == TradeDirection.LONG:
-                unrealized = (current_price - pos['entry_price']) * self.config.contract_size * pos['size']
+            if pos["direction"] == TradeDirection.LONG:
+                unrealized = (
+                    (current_price - pos["entry_price"])
+                    * self.config.contract_size
+                    * pos["size"]
+                )
             else:
-                unrealized = (pos['entry_price'] - current_price) * self.config.contract_size * pos['size']
+                unrealized = (
+                    (pos["entry_price"] - current_price)
+                    * self.config.contract_size
+                    * pos["size"]
+                )
             total_unrealized_pnl += unrealized
 
         # 计算当前权益（包含未实现盈亏）
@@ -295,7 +323,9 @@ class BreakoutGridEngine(BaseBacktestEngine):
         if total_unrealized_pnl < -max_loss_amount:
             # 强制平掉所有持仓
             for level in list(self.grid_positions.keys()):
-                self._close_grid_position(level, current_price, timestamp, ExitReason.STOP_LOSS)
+                self._close_grid_position(
+                    level, current_price, timestamp, ExitReason.STOP_LOSS
+                )
             self.global_stop_loss_exits += 1
             return True
 
@@ -322,32 +352,45 @@ class BreakoutGridEngine(BaseBacktestEngine):
         # 获取或计算止盈价格
         take_profit = signal.take_profit
         if take_profit is None and self._strategy:
-            tp_distance = self._strategy.params.get('take_profit', 5.0)
+            tp_distance = self._strategy.params.get("take_profit", 5.0)
             if signal.direction == TradeDirection.LONG:
                 take_profit = entry_price + tp_distance
             else:
                 take_profit = entry_price - tp_distance
 
         # 执行入场
-        grid_level = signal.metadata.get('grid_level', 0)
+        grid_level = signal.metadata.get("grid_level", 0)
 
         # 如果该网格已有反向持仓，先平仓
         if grid_level in self.grid_positions:
             existing = self.grid_positions[grid_level]
-            if existing['direction'] != signal.direction:
-                self._close_grid_position(grid_level, entry_price, timestamp, ExitReason.SIGNAL_REVERSE)
+            if existing["direction"] != signal.direction:
+                self._close_grid_position(
+                    grid_level, entry_price, timestamp, ExitReason.SIGNAL_REVERSE
+                )
 
         # 开仓
-        self._open_grid_position(grid_level, signal.direction, signal.size or 0.01, entry_price, take_profit, timestamp)
+        self._open_grid_position(
+            grid_level,
+            signal.direction,
+            signal.size or 0.01,
+            entry_price,
+            take_profit,
+            timestamp,
+        )
 
-    def _execute_exit_signal(self, signal: TradeSignal, price: float, timestamp: datetime):
+    def _execute_exit_signal(
+        self, signal: TradeSignal, price: float, timestamp: datetime
+    ):
         """执行平仓信号"""
-        grid_level = signal.metadata.get('grid_level', 0)
-        original_direction = signal.metadata.get('original_direction')
-        is_time_exit = signal.metadata.get('is_time_exit', False)
+        grid_level = signal.metadata.get("grid_level", 0)
+        original_direction = signal.metadata.get("original_direction")
+        is_time_exit = signal.metadata.get("is_time_exit", False)
 
         if grid_level in self.grid_positions:
-            exit_reason = ExitReason.TIME_STOP if is_time_exit else ExitReason.TAKE_PROFIT
+            exit_reason = (
+                ExitReason.TIME_STOP if is_time_exit else ExitReason.TAKE_PROFIT
+            )
             self._close_grid_position(grid_level, price, timestamp, exit_reason)
 
     def _open_grid_position(
@@ -357,16 +400,16 @@ class BreakoutGridEngine(BaseBacktestEngine):
         size: float,
         entry_price: float,
         take_profit: float,
-        timestamp: datetime
+        timestamp: datetime,
     ):
         """开网格仓位"""
         self.grid_positions[level] = {
-            'direction': direction,
-            'size': size,
-            'entry_price': entry_price,
-            'take_profit': take_profit,
-            'entry_time': timestamp,
-            'entry_bar_index': self._current_bar_idx,
+            "direction": direction,
+            "size": size,
+            "entry_price": entry_price,
+            "take_profit": take_profit,
+            "entry_time": timestamp,
+            "entry_bar_index": self._current_bar_idx,
         }
 
         # 更新统计
@@ -380,16 +423,16 @@ class BreakoutGridEngine(BaseBacktestEngine):
         level: int,
         exit_price: float,
         timestamp: datetime,
-        exit_reason: ExitReason
+        exit_reason: ExitReason,
     ) -> Optional[TradeRecord]:
         """平仓网格仓位"""
         if level not in self.grid_positions:
             return None
 
         pos = self.grid_positions[level]
-        direction = pos['direction']
-        size = pos['size']
-        entry_price = pos['entry_price']
+        direction = pos["direction"]
+        size = pos["size"]
+        entry_price = pos["entry_price"]
 
         # 计算盈亏
         if direction == TradeDirection.LONG:
@@ -408,7 +451,7 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
         # 创建交易记录
         trade = TradeRecord(
-            entry_time=pos['entry_time'],
+            entry_time=pos["entry_time"],
             exit_time=timestamp,
             direction=direction,
             size=size,
@@ -418,11 +461,12 @@ class BreakoutGridEngine(BaseBacktestEngine):
             pnl_pct=pnl_points / entry_price if entry_price != 0 else 0,
             strategy_id="BreakoutGrid",
             exit_reason=exit_reason,
-            bars_held=self._current_bar_idx - pos.get('entry_bar_index', self._current_bar_idx),
+            bars_held=self._current_bar_idx
+            - pos.get("entry_bar_index", self._current_bar_idx),
             entry_slippage=0.0,
             exit_slippage=0.0,
             commission=spread_cost,
-            metadata={'grid_level': level}
+            metadata={"grid_level": level},
         )
 
         self.trades.append(trade)
@@ -448,15 +492,17 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
         # 通知策略 - 关键修复：确保策略知道持仓已被平掉
         if self._strategy:
-            self._strategy.on_trade_completed({
-                'profit': pnl,
-                'direction': direction,
-                'entry_price': entry_price,
-                'exit_price': exit_price,
-                'size': size,
-                'exit_reason': exit_reason,
-                'metadata': {'grid_level': level, 'is_exit': True}
-            })
+            self._strategy.on_trade_completed(
+                {
+                    "profit": pnl,
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "size": size,
+                    "exit_reason": exit_reason,
+                    "metadata": {"grid_level": level, "is_exit": True},
+                }
+            )
 
         # 移除网格仓位
         del self.grid_positions[level]
@@ -465,21 +511,27 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
     def _check_take_profit_bar(self, bar: pd.Series, timestamp: datetime):
         """使用K线数据检查止盈（检查高低价是否触及止盈位）"""
-        high = bar['High']
-        low = bar['Low']
+        high = bar["High"]
+        low = bar["Low"]
 
         for level, pos in list(self.grid_positions.items()):
-            tp_price = pos['take_profit']
-            direction = pos['direction']
+            tp_price = pos["take_profit"]
+            direction = pos["direction"]
 
             # 多单止盈：高价触及或超过止盈位
             if direction == TradeDirection.LONG and high >= tp_price:
-                self._close_grid_position(level, tp_price, timestamp, ExitReason.TAKE_PROFIT)
+                self._close_grid_position(
+                    level, tp_price, timestamp, ExitReason.TAKE_PROFIT
+                )
             # 空单止盈：低价触及或低于止盈位
             elif direction == TradeDirection.SHORT and low <= tp_price:
-                self._close_grid_position(level, tp_price, timestamp, ExitReason.TAKE_PROFIT)
+                self._close_grid_position(
+                    level, tp_price, timestamp, ExitReason.TAKE_PROFIT
+                )
 
-    def _check_pending_orders_with_ohlc(self, bar: pd.Series, timestamp: datetime) -> List[TradeSignal]:
+    def _check_pending_orders_with_ohlc(
+        self, bar: pd.Series, timestamp: datetime
+    ) -> List[TradeSignal]:
         """使用K线高低价检查网格穿越并生成信号"""
         if not self._strategy:
             return []
@@ -489,10 +541,12 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
     def _close_all_positions(self, last_bar: pd.Series, timestamp: datetime):
         """强制平仓所有剩余持仓"""
-        exit_price = last_bar['Close']
+        exit_price = last_bar["Close"]
 
         for level in list(self.grid_positions.keys()):
-            self._close_grid_position(level, exit_price, timestamp, ExitReason.END_OF_DATA)
+            self._close_grid_position(
+                level, exit_price, timestamp, ExitReason.END_OF_DATA
+            )
 
     def get_current_equity(self) -> float:
         """计算当前权益（包含未实现盈亏）"""
@@ -501,14 +555,22 @@ class BreakoutGridEngine(BaseBacktestEngine):
         if self._df is None or self._current_bar_idx >= len(self._df):
             return equity
 
-        current_price = self._df.iloc[self._current_bar_idx]['Close']
+        current_price = self._df.iloc[self._current_bar_idx]["Close"]
 
         # 计算未实现盈亏
         for level, pos in self.grid_positions.items():
-            if pos['direction'] == TradeDirection.LONG:
-                unrealized = (current_price - pos['entry_price']) * self.config.contract_size * pos['size']
+            if pos["direction"] == TradeDirection.LONG:
+                unrealized = (
+                    (current_price - pos["entry_price"])
+                    * self.config.contract_size
+                    * pos["size"]
+                )
             else:
-                unrealized = (pos['entry_price'] - current_price) * self.config.contract_size * pos['size']
+                unrealized = (
+                    (pos["entry_price"] - current_price)
+                    * self.config.contract_size
+                    * pos["size"]
+                )
             equity += unrealized
 
         return equity
@@ -519,16 +581,24 @@ class BreakoutGridEngine(BaseBacktestEngine):
 
         # 添加网格策略特有统计
         result.strategy_stats = {
-            'long_entries': self.long_entries,
-            'short_entries': self.short_entries,
-            'long_exits': self.long_exits,
-            'short_exits': self.short_exits,
-            'take_profit_exits': self.take_profit_exits,
-            'time_stop_exits': self.time_stop_exits,
-            'global_stop_loss_exits': self.global_stop_loss_exits,
-            'max_total_loss_pct': self.max_total_loss_pct,
-            'final_long_position': sum(1 for p in self.grid_positions.values() if p['direction'] == TradeDirection.LONG),
-            'final_short_position': sum(1 for p in self.grid_positions.values() if p['direction'] == TradeDirection.SHORT),
+            "long_entries": self.long_entries,
+            "short_entries": self.short_entries,
+            "long_exits": self.long_exits,
+            "short_exits": self.short_exits,
+            "take_profit_exits": self.take_profit_exits,
+            "time_stop_exits": self.time_stop_exits,
+            "global_stop_loss_exits": self.global_stop_loss_exits,
+            "max_total_loss_pct": self.max_total_loss_pct,
+            "final_long_position": sum(
+                1
+                for p in self.grid_positions.values()
+                if p["direction"] == TradeDirection.LONG
+            ),
+            "final_short_position": sum(
+                1
+                for p in self.grid_positions.values()
+                if p["direction"] == TradeDirection.SHORT
+            ),
         }
 
         return result

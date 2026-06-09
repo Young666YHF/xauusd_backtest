@@ -33,7 +33,7 @@ class CandleBacktestEngine(BaseBacktestEngine):
         config: TradingConfig,
         execution_model: Optional[ExecutionModel] = None,
         max_bars: Optional[int] = None,
-        risk_manager=None
+        risk_manager=None,
     ):
         super().__init__(config, execution_model, risk_manager)
 
@@ -41,11 +41,7 @@ class CandleBacktestEngine(BaseBacktestEngine):
         self._pending_signals: Dict[int, TradeSignal] = {}
         self.max_bars = max_bars if max_bars is not None else self.DEFAULT_MAX_BARS
 
-    def run(
-        self,
-        df: pd.DataFrame,
-        signals: List[TradeSignal]
-    ) -> BacktestResult:
+    def run(self, df: pd.DataFrame, signals: List[TradeSignal]) -> BacktestResult:
         """
         执行回测
 
@@ -87,11 +83,7 @@ class CandleBacktestEngine(BaseBacktestEngine):
         # 强制平仓
         if self.position:
             last_bar = df.iloc[-1]
-            self._close_position(
-                last_bar['Close'],
-                ExitReason.END_OF_DATA,
-                0.0
-            )
+            self._close_position(last_bar["Close"], ExitReason.END_OF_DATA, 0.0)
 
         return self._build_result()
 
@@ -105,27 +97,29 @@ class CandleBacktestEngine(BaseBacktestEngine):
         # 检查最大持仓时间
         if pos.bars_held >= self.max_bars:
             self._close_position(
-                bar['Close'],
+                bar["Close"],
                 ExitReason.TIME_STOP,
                 self.execution.calculate_exit_slippage(
-                    bar['Close'], bar.get('ATR', 0), ExitReason.TIME_STOP
-                )
+                    bar["Close"], bar.get("ATR", 0), ExitReason.TIME_STOP
+                ),
             )
             return
 
         # 检查出场条件
-        exit_reason = self._check_exit_conditions(
-            bar['High'], bar['Low'], bar['Close']
-        )
+        exit_reason = self._check_exit_conditions(bar["High"], bar["Low"], bar["Close"])
 
         if exit_reason:
             slippage = self.execution.calculate_exit_slippage(
-                bar['Close'],
-                bar.get('ATR', 0),
+                bar["Close"],
+                bar.get("ATR", 0),
                 exit_reason,
-                StrategyCategory.MEAN_REVERSION if 'MeanReversion' in pos.strategy_id else StrategyCategory.MOMENTUM_BREAKOUT
+                (
+                    StrategyCategory.MEAN_REVERSION
+                    if "MeanReversion" in pos.strategy_id
+                    else StrategyCategory.MOMENTUM_BREAKOUT
+                ),
             )
-            self._close_position(bar['Close'], exit_reason, slippage)
+            self._close_position(bar["Close"], exit_reason, slippage)
 
     def _process_entry(self, signal: TradeSignal, bar: pd.Series):
         """处理入场信号"""
@@ -135,10 +129,10 @@ class CandleBacktestEngine(BaseBacktestEngine):
             return
 
         # 计算滑点
-        atr = bar.get('ATR', 0)
+        atr = bar.get("ATR", 0)
         strategy_category = (
             StrategyCategory.MEAN_REVERSION
-            if 'MeanReversion' in signal.strategy_id
+            if "MeanReversion" in signal.strategy_id
             else StrategyCategory.MOMENTUM_BREAKOUT
         )
         slippage = self.execution.calculate_entry_slippage(
@@ -153,17 +147,21 @@ class CandleBacktestEngine(BaseBacktestEngine):
 
         # 检查止损是否立即触发（开盘跳空）
         if signal.stop_loss:
-            if signal.direction == TradeDirection.LONG and bar['Open'] <= signal.stop_loss:
+            if (
+                signal.direction == TradeDirection.LONG
+                and bar["Open"] <= signal.stop_loss
+            ):
                 return  # 跳过此交易
-            if signal.direction == TradeDirection.SHORT and bar['Open'] >= signal.stop_loss:
+            if (
+                signal.direction == TradeDirection.SHORT
+                and bar["Open"] >= signal.stop_loss
+            ):
                 return  # 跳过此交易
 
         self._open_position(signal, filled_price, slippage)
 
     def _calculate_entry_price(
-        self,
-        signal: TradeSignal,
-        bar: pd.Series
+        self, signal: TradeSignal, bar: pd.Series
     ) -> Optional[float]:
         """
         计算入场价格
@@ -172,28 +170,24 @@ class CandleBacktestEngine(BaseBacktestEngine):
         否则使用开盘价
         """
         if signal.entry_price is None:
-            return bar['Open']
+            return bar["Open"]
 
         target = signal.entry_price
-        high = bar['High']
-        low = bar['Low']
+        high = bar["High"]
+        low = bar["Low"]
 
         # 检查价格是否可达
         if signal.direction == TradeDirection.LONG:
             if target <= high:
-                return max(target, bar['Open'])
+                return max(target, bar["Open"])
         elif signal.direction == TradeDirection.SHORT:
             if target >= low:
-                return min(target, bar['Open'])
+                return min(target, bar["Open"])
 
-        return bar['Open']
+        return bar["Open"]
 
     def run_with_strategy(
-        self,
-        df: pd.DataFrame,
-        strategy,
-        warmup_bars: int = 100,
-        tick_df=None
+        self, df: pd.DataFrame, strategy, warmup_bars: int = 100, tick_df=None
     ) -> BacktestResult:
         """
         使用策略对象运行回测

@@ -28,7 +28,10 @@ Dollar Trader Martingale 策略 - 三线SMA趋势跟踪 + 马丁格尔仓位管�
 from typing import Dict, List, Optional, Any
 import pandas as pd
 
-from strategies.dollar_trader_base import DollarTraderBaseStrategy, calculate_dollar_trader_base_indicators
+from strategies.dollar_trader_base import (
+    DollarTraderBaseStrategy,
+    calculate_dollar_trader_base_indicators,
+)
 from core.types import TradeSignal, TradeDirection, ExitReason
 from core.indicators import calculate_sma
 
@@ -66,28 +69,28 @@ class DollarTraderMartingaleStrategy(DollarTraderBaseStrategy):
 
         # 马丁格尔状态
         self.consecutive_losses: int = 0  # 连续亏损次数
-        self.current_position_size: float = self.params['position_size']  # 当前实际仓位
+        self.current_position_size: float = self.params["position_size"]  # 当前实际仓位
         self.last_trade_profit: Optional[float] = None  # 上次交易盈亏
 
     def get_default_params(self) -> Dict[str, Any]:
         """返回默认参数"""
         return {
-            'sma_short': 20,
-            'sma_medium': 50,
-            'sma_long': 200,
-            'position_size': 1.0,  # 基础仓位
-            'martingale_multiplier': 2.0,  # 马丁格尔倍数 (可配置)
-            'max_martingale_steps': 5,  # 最大连续翻倍次数
+            "sma_short": 20,
+            "sma_medium": 50,
+            "sma_long": 200,
+            "position_size": 1.0,  # 基础仓位
+            "martingale_multiplier": 2.0,  # 马丁格尔倍数 (可配置)
+            "max_martingale_steps": 5,  # 最大连续翻倍次数
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """返回参数优化范围"""
         return {
-            'sma_short': (10, 30),
-            'sma_medium': (30, 70),
-            'sma_long': (100, 300),
-            'martingale_multiplier': (1.5, 3.0),
-            'max_martingale_steps': (3, 8),
+            "sma_short": (10, 30),
+            "sma_medium": (30, 70),
+            "sma_long": (100, 300),
+            "martingale_multiplier": (1.5, 3.0),
+            "max_martingale_steps": (3, 8),
         }
 
     def _calculate_martingale_position_size(self) -> float:
@@ -97,15 +100,15 @@ class DollarTraderMartingaleStrategy(DollarTraderBaseStrategy):
         Returns:
             当前应使用的仓位大小
         """
-        base_size = self.params['position_size']
-        multiplier = self.params['martingale_multiplier']
-        max_steps = self.params['max_martingale_steps']
+        base_size = self.params["position_size"]
+        multiplier = self.params["martingale_multiplier"]
+        max_steps = self.params["max_martingale_steps"]
 
         # 限制最大翻倍次数
         effective_losses = min(self.consecutive_losses, max_steps)
 
         # 计算仓位: base * multiplier^losses
-        position_size = base_size * (multiplier ** effective_losses)
+        position_size = base_size * (multiplier**effective_losses)
 
         return position_size
 
@@ -116,7 +119,7 @@ class DollarTraderMartingaleStrategy(DollarTraderBaseStrategy):
         Args:
             trade_record: 交易记录
         """
-        profit = trade_record.get('profit', 0)
+        profit = trade_record.get("profit", 0)
         self.last_trade_profit = profit
 
         if profit > 0:
@@ -150,7 +153,11 @@ class DollarTraderMartingaleStrategy(DollarTraderBaseStrategy):
         self._update_martingale_state(trade_record)
 
         # 当持仓被平仓时，重置当前持仓状态
-        if trade_record.get('exit_reason') in [ExitReason.SIGNAL_REVERSE, ExitReason.FORCE_CLOSE, ExitReason.END_OF_DATA]:
+        if trade_record.get("exit_reason") in [
+            ExitReason.SIGNAL_REVERSE,
+            ExitReason.FORCE_CLOSE,
+            ExitReason.END_OF_DATA,
+        ]:
             self.current_position = None
 
     def reset(self):
@@ -158,7 +165,7 @@ class DollarTraderMartingaleStrategy(DollarTraderBaseStrategy):
         super().reset()
         self.current_position = None
         self.consecutive_losses = 0
-        self.current_position_size = self.params['position_size']
+        self.current_position_size = self.params["position_size"]
         self.last_trade_profit = None
 
     def get_position_size(self) -> float:
@@ -172,10 +179,7 @@ class DollarTraderMartingaleStrategy(DollarTraderBaseStrategy):
 
 
 def calculate_dollar_trader_martingale_indicators(
-    df: pd.DataFrame,
-    sma_short: int = 20,
-    sma_medium: int = 50,
-    sma_long: int = 200
+    df: pd.DataFrame, sma_short: int = 20, sma_medium: int = 50, sma_long: int = 200
 ) -> pd.DataFrame:
     """
     计算Dollar Trader Martingale策略所需的所有指标

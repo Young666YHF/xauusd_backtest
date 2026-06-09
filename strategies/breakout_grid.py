@@ -44,14 +44,15 @@ from core.types import TradeSignal, TradeDirection, SignalType, TickData
 @dataclass
 class GridLevel:
     """网格级别数据"""
-    price: float           # 网格价格
-    level_index: int       # 网格索引
-    long_position: float = 0.0   # 当前多单持仓
+
+    price: float  # 网格价格
+    level_index: int  # 网格索引
+    long_position: float = 0.0  # 当前多单持仓
     short_position: float = 0.0  # 当前空单持仓
     long_entry_price: float = 0.0  # 多单实际入场价
-    short_entry_price: float = 0.0 # 空单实际入场价
+    short_entry_price: float = 0.0  # 空单实际入场价
     long_entry_time: Optional[datetime] = None  # 多单入场时间
-    short_entry_time: Optional[datetime] = None # 空单入场时间
+    short_entry_time: Optional[datetime] = None  # 空单入场时间
 
 
 class BreakoutGridStrategy(BaseStrategy):
@@ -62,13 +63,13 @@ class BreakoutGridStrategy(BaseStrategy):
     """
 
     # 网格配置常量
-    GRID_SPACING = 5.0          # 网格间隔5美元
-    GRID_MIN = 0.0              # 最小网格价格
-    GRID_MAX = 10000.0          # 最大网格价格
-    COVERAGE_COUNT = 5          # 上下各覆盖5个网格
-    INITIAL_POSITION = 0.01     # 初始仓位
+    GRID_SPACING = 5.0  # 网格间隔5美元
+    GRID_MIN = 0.0  # 最小网格价格
+    GRID_MAX = 10000.0  # 最大网格价格
+    COVERAGE_COUNT = 5  # 上下各覆盖5个网格
+    INITIAL_POSITION = 0.01  # 初始仓位
     TAKE_PROFIT_DISTANCE = 5.0  # 止盈距离5美元
-    DEFAULT_MAX_HOLD_DAYS = 3   # 默认最大持仓天数
+    DEFAULT_MAX_HOLD_DAYS = 3  # 默认最大持仓天数
 
     def __init__(self, params: Optional[Dict[str, Any]] = None, strategy_id: str = ""):
         """
@@ -86,7 +87,7 @@ class BreakoutGridStrategy(BaseStrategy):
         super().__init__(params, strategy_id or "BreakoutGrid")
 
         # 根据参数计算网格数量
-        spacing = self.params.get('grid_spacing', self.GRID_SPACING)
+        spacing = self.params.get("grid_spacing", self.GRID_SPACING)
         self.max_grid_levels = int(self.GRID_MAX / spacing) + 1
 
         # 网格状态
@@ -107,7 +108,7 @@ class BreakoutGridStrategy(BaseStrategy):
 
     def _init_grids(self):
         """初始化所有网格"""
-        spacing = self.params.get('grid_spacing', self.GRID_SPACING)
+        spacing = self.params.get("grid_spacing", self.GRID_SPACING)
         for i in range(self.max_grid_levels):
             price = i * spacing
             self.grids[i] = GridLevel(price=price, level_index=i)
@@ -115,32 +116,29 @@ class BreakoutGridStrategy(BaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         """返回默认参数"""
         return {
-            'grid_spacing': self.GRID_SPACING,
-            'coverage_count': self.COVERAGE_COUNT,
-            'initial_position': self.INITIAL_POSITION,
-            'take_profit': self.TAKE_PROFIT_DISTANCE,
-            'max_hold_days': self.DEFAULT_MAX_HOLD_DAYS,
+            "grid_spacing": self.GRID_SPACING,
+            "coverage_count": self.COVERAGE_COUNT,
+            "initial_position": self.INITIAL_POSITION,
+            "take_profit": self.TAKE_PROFIT_DISTANCE,
+            "max_hold_days": self.DEFAULT_MAX_HOLD_DAYS,
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """返回参数优化范围"""
         return {
-            'grid_spacing': (3.0, 10.0),
-            'coverage_count': (3, 10),
-            'initial_position': (0.01, 0.05),
-            'take_profit': (3.0, 10.0),
-            'max_hold_days': (1, 7),
+            "grid_spacing": (3.0, 10.0),
+            "coverage_count": (3, 10),
+            "initial_position": (0.01, 0.05),
+            "take_profit": (3.0, 10.0),
+            "max_hold_days": (1, 7),
         }
 
     def get_position_size(self) -> float:
         """获取当前仓位大小（用于回测引擎）"""
-        return self.params.get('initial_position', self.INITIAL_POSITION)
+        return self.params.get("initial_position", self.INITIAL_POSITION)
 
     def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        **kwargs
+        self, df: pd.DataFrame, current_idx: int, **kwargs
     ) -> List[TradeSignal]:
         """
         生成交易信号 - 基于K线数据
@@ -151,15 +149,15 @@ class BreakoutGridStrategy(BaseStrategy):
             return signals
 
         current_bar = df.iloc[current_idx]
-        price = current_bar['Close']
+        price = current_bar["Close"]
         timestamp = df.index[current_idx]
 
         # K线模式下使用high/low检测穿越
         if self.is_initialized and current_idx > 0:
             prev_bar = df.iloc[current_idx - 1]
-            prev_price = prev_bar['Close']
-            high = current_bar['High']
-            low = current_bar['Low']
+            prev_price = prev_bar["Close"]
+            high = current_bar["High"]
+            low = current_bar["Low"]
 
             new_signals = self._check_grid_crossings(
                 prev_price, price, high, low, timestamp, current_idx
@@ -197,7 +195,7 @@ class BreakoutGridStrategy(BaseStrategy):
         self.current_price = price
 
         # 计算当前价格所在的网格索引
-        spacing = self.params.get('grid_spacing', self.GRID_SPACING)
+        spacing = self.params.get("grid_spacing", self.GRID_SPACING)
         center_level = int(price / spacing)
         center_level = max(0, min(center_level, self.max_grid_levels - 1))
 
@@ -209,12 +207,14 @@ class BreakoutGridStrategy(BaseStrategy):
         elif center_level != self.current_center_level:
             self.current_center_level = center_level
 
-    def _initialize_strategy(self, price: float, timestamp: datetime, center_level: int):
+    def _initialize_strategy(
+        self, price: float, timestamp: datetime, center_level: int
+    ):
         """
         初始化策略
         """
-        spacing = self.params.get('grid_spacing', self.GRID_SPACING)
-        initial_size = self.params.get('initial_position', self.INITIAL_POSITION)
+        spacing = self.params.get("grid_spacing", self.GRID_SPACING)
+        initial_size = self.params.get("initial_position", self.INITIAL_POSITION)
 
         # 设置当前中心网格
         self.current_center_level = center_level
@@ -242,7 +242,7 @@ class BreakoutGridStrategy(BaseStrategy):
         high: float,
         low: float,
         timestamp: datetime,
-        bar_idx: int
+        bar_idx: int,
     ) -> List[TradeSignal]:
         """
         检查价格是否穿越了监控范围内的网格线
@@ -253,7 +253,7 @@ class BreakoutGridStrategy(BaseStrategy):
         返回所有触发的交易信号列表
         """
         signals = []
-        spacing = self.params.get('grid_spacing', self.GRID_SPACING)
+        spacing = self.params.get("grid_spacing", self.GRID_SPACING)
         long_lot_size, short_lot_size = self._calculate_lot_sizes()
 
         # 确定需要检查的价格范围
@@ -282,8 +282,12 @@ class BreakoutGridStrategy(BaseStrategy):
                 # 检查是否向上突破网格线
                 if prev_price < grid_price and curr_price >= grid_price:
                     signal = self._execute_market_order(
-                        level, TradeDirection.LONG, long_lot_size,
-                        curr_price, timestamp, bar_idx
+                        level,
+                        TradeDirection.LONG,
+                        long_lot_size,
+                        curr_price,
+                        timestamp,
+                        bar_idx,
                     )
                     if signal:
                         signals.append(signal)
@@ -291,8 +295,12 @@ class BreakoutGridStrategy(BaseStrategy):
                 # K线模式下检查high是否突破
                 elif high >= grid_price and low < grid_price:
                     signal = self._execute_market_order(
-                        level, TradeDirection.LONG, long_lot_size,
-                        curr_price, timestamp, bar_idx
+                        level,
+                        TradeDirection.LONG,
+                        long_lot_size,
+                        curr_price,
+                        timestamp,
+                        bar_idx,
                     )
                     if signal:
                         signals.append(signal)
@@ -303,8 +311,12 @@ class BreakoutGridStrategy(BaseStrategy):
                 # 检查是否向下突破网格线
                 if prev_price > grid_price and curr_price <= grid_price:
                     signal = self._execute_market_order(
-                        level, TradeDirection.SHORT, short_lot_size,
-                        curr_price, timestamp, bar_idx
+                        level,
+                        TradeDirection.SHORT,
+                        short_lot_size,
+                        curr_price,
+                        timestamp,
+                        bar_idx,
                     )
                     if signal:
                         signals.append(signal)
@@ -312,8 +324,12 @@ class BreakoutGridStrategy(BaseStrategy):
                 # K线模式下检查low是否跌破
                 elif low <= grid_price and high > grid_price:
                     signal = self._execute_market_order(
-                        level, TradeDirection.SHORT, short_lot_size,
-                        curr_price, timestamp, bar_idx
+                        level,
+                        TradeDirection.SHORT,
+                        short_lot_size,
+                        curr_price,
+                        timestamp,
+                        bar_idx,
                     )
                     if signal:
                         signals.append(signal)
@@ -326,17 +342,21 @@ class BreakoutGridStrategy(BaseStrategy):
         计算多空入场手数（基于仓位平衡）
         最大手数不超过初始仓位的10倍
         """
-        initial_size = self.params.get('initial_position', self.INITIAL_POSITION)
+        initial_size = self.params.get("initial_position", self.INITIAL_POSITION)
         max_size = initial_size * 10  # 最大手数限制
 
         if self.total_short_position > self.total_long_position:
             # 空单多于多单：多单入场数量 = 差额 + 0.01，空单入场数量 = 0.01
-            long_lot_size = self.total_short_position - self.total_long_position + initial_size
+            long_lot_size = (
+                self.total_short_position - self.total_long_position + initial_size
+            )
             short_lot_size = initial_size
         elif self.total_long_position > self.total_short_position:
             # 多单多于空单：多单入场数量 = 0.01，空单入场数量 = 差额 + 0.01
             long_lot_size = initial_size
-            short_lot_size = self.total_long_position - self.total_short_position + initial_size
+            short_lot_size = (
+                self.total_long_position - self.total_short_position + initial_size
+            )
         else:
             # 平衡状态
             long_lot_size = initial_size
@@ -355,11 +375,11 @@ class BreakoutGridStrategy(BaseStrategy):
         size: float,
         price: float,
         timestamp: datetime,
-        bar_idx: int
+        bar_idx: int,
     ) -> TradeSignal:
         """执行市价订单"""
         grid = self.grids[level]
-        tp_distance = self.params.get('take_profit', self.TAKE_PROFIT_DISTANCE)
+        tp_distance = self.params.get("take_profit", self.TAKE_PROFIT_DISTANCE)
 
         # 更新网格状态
         if direction == TradeDirection.LONG:
@@ -394,21 +414,21 @@ class BreakoutGridStrategy(BaseStrategy):
             execution_bar_idx=bar_idx,
             size=size,
             metadata={
-                'grid_level': level,
-                'grid_price': grid.price,
-                'total_long': self.total_long_position,
-                'total_short': self.total_short_position,
-            }
+                "grid_level": level,
+                "grid_price": grid.price,
+                "total_long": self.total_long_position,
+                "total_short": self.total_short_position,
+            },
         )
 
     def on_trade_completed(self, trade_record: Dict[str, Any]):
         """
         交易完成回调（止盈平仓时）
         """
-        metadata = trade_record.get('metadata', {})
-        grid_level = metadata.get('grid_level')
-        direction = trade_record.get('direction')
-        size = trade_record.get('size', 0)
+        metadata = trade_record.get("metadata", {})
+        grid_level = metadata.get("grid_level")
+        direction = trade_record.get("direction")
+        size = trade_record.get("size", 0)
 
         # 处理方向可能是整数或枚举的情况
         is_long = False
@@ -438,8 +458,8 @@ class BreakoutGridStrategy(BaseStrategy):
         检查止盈条件和时间平仓条件（3天）
         """
         signals = []
-        tp_distance = self.params.get('take_profit', self.TAKE_PROFIT_DISTANCE)
-        max_hold_days = self.params.get('max_hold_days', self.DEFAULT_MAX_HOLD_DAYS)
+        tp_distance = self.params.get("take_profit", self.TAKE_PROFIT_DISTANCE)
+        max_hold_days = self.params.get("max_hold_days", self.DEFAULT_MAX_HOLD_DAYS)
 
         for level, grid in self.grids.items():
             # 检查多单止盈
@@ -448,8 +468,12 @@ class BreakoutGridStrategy(BaseStrategy):
                 take_profit_price = grid.long_entry_price + tp_distance
                 if price >= take_profit_price:
                     signal = self._create_exit_signal(
-                        level, TradeDirection.LONG, grid.long_position,
-                        price, timestamp, f"Long Take Profit @ {take_profit_price:.2f}"
+                        level,
+                        TradeDirection.LONG,
+                        grid.long_position,
+                        price,
+                        timestamp,
+                        f"Long Take Profit @ {take_profit_price:.2f}",
                     )
                     signals.append(signal)
                     continue
@@ -459,9 +483,13 @@ class BreakoutGridStrategy(BaseStrategy):
                     hold_time = timestamp - grid.long_entry_time
                     if hold_time.total_seconds() / 86400 >= max_hold_days:
                         signal = self._create_exit_signal(
-                            level, TradeDirection.LONG, grid.long_position,
-                            price, timestamp, f"Long Time Exit ({max_hold_days} days)",
-                            is_time_exit=True
+                            level,
+                            TradeDirection.LONG,
+                            grid.long_position,
+                            price,
+                            timestamp,
+                            f"Long Time Exit ({max_hold_days} days)",
+                            is_time_exit=True,
                         )
                         signals.append(signal)
                         continue
@@ -472,8 +500,12 @@ class BreakoutGridStrategy(BaseStrategy):
                 take_profit_price = grid.short_entry_price - tp_distance
                 if price <= take_profit_price:
                     signal = self._create_exit_signal(
-                        level, TradeDirection.SHORT, grid.short_position,
-                        price, timestamp, f"Short Take Profit @ {take_profit_price:.2f}"
+                        level,
+                        TradeDirection.SHORT,
+                        grid.short_position,
+                        price,
+                        timestamp,
+                        f"Short Take Profit @ {take_profit_price:.2f}",
                     )
                     signals.append(signal)
                     continue
@@ -483,9 +515,13 @@ class BreakoutGridStrategy(BaseStrategy):
                     hold_time = timestamp - grid.short_entry_time
                     if hold_time.total_seconds() / 86400 >= max_hold_days:
                         signal = self._create_exit_signal(
-                            level, TradeDirection.SHORT, grid.short_position,
-                            price, timestamp, f"Short Time Exit ({max_hold_days} days)",
-                            is_time_exit=True
+                            level,
+                            TradeDirection.SHORT,
+                            grid.short_position,
+                            price,
+                            timestamp,
+                            f"Short Time Exit ({max_hold_days} days)",
+                            is_time_exit=True,
                         )
                         signals.append(signal)
                         continue
@@ -500,12 +536,16 @@ class BreakoutGridStrategy(BaseStrategy):
         price: float,
         timestamp: datetime,
         reason: str,
-        is_time_exit: bool = False
+        is_time_exit: bool = False,
     ) -> TradeSignal:
         """创建平仓信号"""
         grid = self.grids[level]
 
-        exit_direction = TradeDirection.SHORT if direction == TradeDirection.LONG else TradeDirection.LONG
+        exit_direction = (
+            TradeDirection.SHORT
+            if direction == TradeDirection.LONG
+            else TradeDirection.LONG
+        )
 
         return self._create_signal(
             timestamp=timestamp,
@@ -518,11 +558,11 @@ class BreakoutGridStrategy(BaseStrategy):
             execution_bar_idx=0,
             size=size,
             metadata={
-                'grid_level': level,
-                'close_position': True,
-                'original_direction': direction,
-                'is_time_exit': is_time_exit,
-            }
+                "grid_level": level,
+                "close_position": True,
+                "original_direction": direction,
+                "is_time_exit": is_time_exit,
+            },
         )
 
     def reset(self):
@@ -540,12 +580,14 @@ class BreakoutGridStrategy(BaseStrategy):
     def get_state(self) -> Dict[str, Any]:
         """获取策略当前状态"""
         state = super().get_state()
-        state.update({
-            'total_long_position': self.total_long_position,
-            'total_short_position': self.total_short_position,
-            'current_price': self.current_price,
-            'current_center_level': self.current_center_level,
-            'is_initialized': self.is_initialized,
-            'net_position': self.total_long_position - self.total_short_position,
-        })
+        state.update(
+            {
+                "total_long_position": self.total_long_position,
+                "total_short_position": self.total_short_position,
+                "current_price": self.current_price,
+                "current_center_level": self.current_center_level,
+                "is_initialized": self.is_initialized,
+                "net_position": self.total_long_position - self.total_short_position,
+            }
+        )
         return state

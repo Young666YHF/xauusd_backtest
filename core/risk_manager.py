@@ -13,6 +13,7 @@ import pandas as pd
 
 class RiskLevel(Enum):
     """风险等级枚举"""
+
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -22,6 +23,7 @@ class RiskLevel(Enum):
 @dataclass
 class RiskMetrics:
     """风险指标数据结构"""
+
     var_95: float = 0.0  # 95% VaR
     var_99: float = 0.0  # 99% VaR
     expected_shortfall: float = 0.0  # 预期亏损
@@ -44,15 +46,17 @@ class RiskManager:
         max_drawdown_pct: float = 0.15,
         max_leverage: float = 100.0,
         risk_per_trade_pct: float = 0.01,
-        max_consecutive_losses: int = 5
+        max_consecutive_losses: int = 5,
     ):
         src = config if config is not None else {}
-        self.max_position_size = getattr(src, 'max_position_size', max_position_size)
-        self.max_daily_loss_pct = getattr(src, 'max_daily_loss_pct', max_daily_loss_pct)
-        self.max_drawdown_pct = getattr(src, 'max_drawdown_pct', max_drawdown_pct)
-        self.max_leverage = getattr(src, 'max_leverage', max_leverage)
-        self.risk_per_trade_pct = getattr(src, 'risk_per_trade_pct', risk_per_trade_pct)
-        self.max_consecutive_losses = getattr(src, 'max_consecutive_losses', max_consecutive_losses)
+        self.max_position_size = getattr(src, "max_position_size", max_position_size)
+        self.max_daily_loss_pct = getattr(src, "max_daily_loss_pct", max_daily_loss_pct)
+        self.max_drawdown_pct = getattr(src, "max_drawdown_pct", max_drawdown_pct)
+        self.max_leverage = getattr(src, "max_leverage", max_leverage)
+        self.risk_per_trade_pct = getattr(src, "risk_per_trade_pct", risk_per_trade_pct)
+        self.max_consecutive_losses = getattr(
+            src, "max_consecutive_losses", max_consecutive_losses
+        )
 
         # 状态追踪
         self.daily_pnl: float = 0.0
@@ -70,7 +74,11 @@ class RiskManager:
             self.peak_equity = equity
             self.consecutive_losses = 0
 
-        self.current_drawdown = (self.peak_equity - equity) / self.peak_equity if self.peak_equity > 0 else 0
+        self.current_drawdown = (
+            (self.peak_equity - equity) / self.peak_equity
+            if self.peak_equity > 0
+            else 0
+        )
 
     def record_trade(self, pnl: float):
         """记录交易结果"""
@@ -85,7 +93,9 @@ class RiskManager:
     def can_trade(self, current_equity: float) -> Tuple[bool, str]:
         """检查是否可以开仓"""
         # 检查每日最大亏损
-        daily_loss_pct = abs(self.daily_pnl) / current_equity if current_equity > 0 else 0
+        daily_loss_pct = (
+            abs(self.daily_pnl) / current_equity if current_equity > 0 else 0
+        )
         if daily_loss_pct >= self.max_daily_loss_pct:
             return False, f"Daily loss limit reached: {daily_loss_pct:.2%}"
 
@@ -104,7 +114,7 @@ class RiskManager:
         capital: float,
         entry_price: float,
         stop_loss: float,
-        atr: Optional[float] = None
+        atr: Optional[float] = None,
     ) -> float:
         """
         基于风险计算仓位大小
@@ -142,11 +152,7 @@ class RiskManager:
         return max(0.0, position_size)
 
     def calculate_stop_loss(
-        self,
-        entry_price: float,
-        direction: int,
-        atr: float,
-        multiplier: float = 1.5
+        self, entry_price: float, direction: int, atr: float, multiplier: float = 1.5
     ) -> float:
         """
         基于ATR计算止损价格
@@ -172,7 +178,7 @@ class RiskManager:
         entry_price: float,
         stop_loss: float,
         direction: int,
-        rr_ratio: float = 2.0
+        rr_ratio: float = 2.0,
     ) -> float:
         """
         基于风险回报比计算止盈价格
@@ -201,7 +207,7 @@ class RiskManager:
         lowest_price: float,
         direction: int,
         atr: float,
-        multiplier: float = 2.0
+        multiplier: float = 2.0,
     ) -> Optional[float]:
         """
         计算追踪止损价格
@@ -283,5 +289,5 @@ class RiskManager:
             "daily_trades": self.daily_trades,
             "current_drawdown": self.current_drawdown,
             "consecutive_losses": self.consecutive_losses,
-            "can_trade": self.can_trade(100000)[0]  # 示例检查
+            "can_trade": self.can_trade(100000)[0],  # 示例检查
         }

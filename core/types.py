@@ -14,6 +14,7 @@ import numpy as np
 
 class SignalType(Enum):
     """信号类型枚举"""
+
     NONE = 0
     LONG = 1
     SHORT = -1
@@ -24,6 +25,7 @@ class SignalType(Enum):
 
 class TradeDirection(IntEnum):
     """交易方向枚举"""
+
     LONG = 1
     SHORT = -1
     FLAT = 0
@@ -31,6 +33,7 @@ class TradeDirection(IntEnum):
 
 class OrderType(Enum):
     """订单类型枚举"""
+
     MARKET = "market"
     LIMIT = "limit"
     STOP = "stop"
@@ -39,6 +42,7 @@ class OrderType(Enum):
 
 class ExitReason(IntEnum):
     """出场原因枚举"""
+
     NONE = 0
     STOP_LOSS = 1
     TAKE_PROFIT = 2
@@ -53,6 +57,7 @@ class ExitReason(IntEnum):
 
 class StrategyType(Enum):
     """策略类型枚举"""
+
     MEAN_REVERSION = "mean_reversion"  # 均值回归
     MOMENTUM_BREAKOUT = "momentum_breakout"  # 动量突破
     TREND_FOLLOWING = "trend_following"  # 趋势跟踪
@@ -63,6 +68,7 @@ class StrategyType(Enum):
 @dataclass
 class TradeSignal:
     """交易信号数据结构"""
+
     timestamp: datetime
     signal_type: SignalType
     strategy_id: str  # 策略标识
@@ -81,15 +87,22 @@ class TradeSignal:
 
     def __post_init__(self):
         """验证信号一致性"""
-        if self.signal_type == SignalType.LONG and self.direction != TradeDirection.LONG:
+        if (
+            self.signal_type == SignalType.LONG
+            and self.direction != TradeDirection.LONG
+        ):
             raise ValueError("LONG signal must have LONG direction")
-        if self.signal_type == SignalType.SHORT and self.direction != TradeDirection.SHORT:
+        if (
+            self.signal_type == SignalType.SHORT
+            and self.direction != TradeDirection.SHORT
+        ):
             raise ValueError("SHORT signal must have SHORT direction")
 
 
 @dataclass
 class MarketData:
     """市场数据结构"""
+
     timestamp: datetime
     open: float
     high: float
@@ -114,6 +127,7 @@ class MarketData:
 @dataclass
 class TickData:
     """Tick数据结构的"""
+
     timestamp: datetime
     bid: float
     ask: float
@@ -134,6 +148,7 @@ class TickData:
 @dataclass
 class Position:
     """持仓数据结构"""
+
     entry_time: datetime
     entry_price: float
     direction: TradeDirection
@@ -144,7 +159,7 @@ class Position:
 
     # 动态追踪
     highest_price: float = field(default=0.0)
-    lowest_price: float = field(default=float('inf'))
+    lowest_price: float = field(default=float("inf"))
     current_price: float = field(default=0.0)
     bars_held: int = field(default=0)
 
@@ -155,7 +170,7 @@ class Position:
         """初始化追踪价格"""
         if self.highest_price == 0.0:
             self.highest_price = self.entry_price
-        if self.lowest_price == float('inf'):
+        if self.lowest_price == float("inf"):
             self.lowest_price = self.entry_price
         if self.current_price == 0.0:
             self.current_price = self.entry_price
@@ -187,6 +202,7 @@ class Position:
 @dataclass
 class TradeRecord:
     """交易记录数据结构"""
+
     entry_time: datetime
     exit_time: datetime
     direction: TradeDirection
@@ -219,6 +235,7 @@ class TradeRecord:
 @dataclass
 class BacktestResult:
     """回测结果数据结构"""
+
     # 基本统计
     total_trades: int = 0
     winning_trades: int = 0
@@ -272,10 +289,14 @@ class BacktestResult:
             self.avg_pnl = self.total_pnl / self.total_trades
 
         if self.winning_trades > 0:
-            self.avg_win = sum(t.pnl for t in self.trades if t.is_win) / self.winning_trades
+            self.avg_win = (
+                sum(t.pnl for t in self.trades if t.is_win) / self.winning_trades
+            )
 
         if self.losing_trades > 0:
-            self.avg_loss = sum(t.pnl for t in self.trades if t.is_loss) / self.losing_trades
+            self.avg_loss = (
+                sum(t.pnl for t in self.trades if t.is_loss) / self.losing_trades
+            )
 
         # 盈利因子
         total_gains = sum(t.pnl for t in self.trades if t.is_win)
@@ -283,32 +304,33 @@ class BacktestResult:
         if total_losses > 0:
             self.profit_factor = total_gains / total_losses
         elif total_gains > 0:
-            self.profit_factor = float('inf')
+            self.profit_factor = float("inf")
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
-            'total_trades': self.total_trades,
-            'winning_trades': self.winning_trades,
-            'losing_trades': self.losing_trades,
-            'win_rate': self.win_rate,
-            'total_pnl': self.total_pnl,
-            'total_return': self.total_return,
-            'avg_pnl': self.avg_pnl,
-            'avg_win': self.avg_win,
-            'avg_loss': self.avg_loss,
-            'profit_factor': self.profit_factor,
-            'max_drawdown': self.max_drawdown,
-            'max_drawdown_pct': self.max_drawdown_pct,
-            'sharpe_ratio': self.sharpe_ratio,
-            'sortino_ratio': self.sortino_ratio,
-            'calmar_ratio': self.calmar_ratio,
+            "total_trades": self.total_trades,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
+            "win_rate": self.win_rate,
+            "total_pnl": self.total_pnl,
+            "total_return": self.total_return,
+            "avg_pnl": self.avg_pnl,
+            "avg_win": self.avg_win,
+            "avg_loss": self.avg_loss,
+            "profit_factor": self.profit_factor,
+            "max_drawdown": self.max_drawdown,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "sharpe_ratio": self.sharpe_ratio,
+            "sortino_ratio": self.sortino_ratio,
+            "calmar_ratio": self.calmar_ratio,
         }
 
 
 @dataclass
 class OptimizationResult:
     """优化结果数据结构"""
+
     # 最优参数
     best_params: Dict[str, Any] = field(default_factory=dict)
     best_fitness: float = 0.0
@@ -334,15 +356,17 @@ class OptimizationResult:
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
-            'best_params': self.best_params,
-            'best_fitness': self.best_fitness,
-            'total_trials': self.total_trials,
-            'completed_trials': self.completed_trials,
-            'pruned_trials': self.pruned_trials,
-            'failed_trials': self.failed_trials,
-            'duration_seconds': self.duration_seconds,
-            'train_results': self.train_results.to_dict() if self.train_results else None,
-            'test_results': self.test_results.to_dict() if self.test_results else None,
+            "best_params": self.best_params,
+            "best_fitness": self.best_fitness,
+            "total_trials": self.total_trials,
+            "completed_trials": self.completed_trials,
+            "pruned_trials": self.pruned_trials,
+            "failed_trials": self.failed_trials,
+            "duration_seconds": self.duration_seconds,
+            "train_results": (
+                self.train_results.to_dict() if self.train_results else None
+            ),
+            "test_results": self.test_results.to_dict() if self.test_results else None,
         }
 
 

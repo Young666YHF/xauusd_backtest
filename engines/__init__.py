@@ -11,10 +11,10 @@ from .dollar_trader_engine import DollarTraderBacktestEngine
 from .breakout_grid_engine import BreakoutGridEngine
 
 __all__ = [
-    'BaseBacktestEngine',
-    'ExecutionModel',
-    'CandleBacktestEngine',
-    'TickBacktestEngine',
-    'DollarTraderBacktestEngine',
-    'BreakoutGridEngine',
+    "BaseBacktestEngine",
+    "ExecutionModel",
+    "CandleBacktestEngine",
+    "TickBacktestEngine",
+    "DollarTraderBacktestEngine",
+    "BreakoutGridEngine",
 ]

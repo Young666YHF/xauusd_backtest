@@ -20,7 +20,12 @@ from datetime import datetime
 
 from strategies.base import BaseStrategy
 from core.types import TradeSignal, TradeDirection, SignalType, ExitReason
-from core.indicators import calculate_sma, calculate_atr, calculate_bollinger_bands, calculate_rsi
+from core.indicators import (
+    calculate_sma,
+    calculate_atr,
+    calculate_bollinger_bands,
+    calculate_rsi,
+)
 
 
 class MeanReversionMartingaleStrategy(BaseStrategy):
@@ -54,54 +59,53 @@ class MeanReversionMartingaleStrategy(BaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         return {
             # 布林带参数
-            'bb_period': 20,
-            'bb_std': 2.0,
-
+            "bb_period": 20,
+            "bb_std": 2.0,
             # RSI参数
-            'rsi_period': 14,
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-
+            "rsi_period": 14,
+            "rsi_oversold": 30,
+            "rsi_overbought": 70,
             # 止损止盈
-            'atr_period': 14,
-            'stop_loss_atr': 2.0,
-            'take_profit_atr': 3.0,
-
+            "atr_period": 14,
+            "stop_loss_atr": 2.0,
+            "take_profit_atr": 3.0,
             # 马丁参数
-            'position_size': 0.01,
-            'martingale_multiplier': 1.5,
-            'max_martingale_steps': 5,
-
+            "position_size": 0.01,
+            "martingale_multiplier": 1.5,
+            "max_martingale_steps": 5,
             # 确认K线数
-            'confirmation_bars': 1,
+            "confirmation_bars": 1,
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         return {
-            'bb_period': (15, 30),
-            'bb_std': (1.5, 2.5),
-            'rsi_oversold': (20, 35),
-            'rsi_overbought': (65, 80),
-            'stop_loss_atr': (1.5, 3.0),
-            'take_profit_atr': (2.0, 5.0),
-            'martingale_multiplier': (1.3, 2.0),
-            'max_martingale_steps': (3, 7),
+            "bb_period": (15, 30),
+            "bb_std": (1.5, 2.5),
+            "rsi_oversold": (20, 35),
+            "rsi_overbought": (65, 80),
+            "stop_loss_atr": (1.5, 3.0),
+            "take_profit_atr": (2.0, 5.0),
+            "martingale_multiplier": (1.3, 2.0),
+            "max_martingale_steps": (3, 7),
         }
 
     def _calculate_position_size(self) -> float:
-        base = self.params['position_size']
-        mult = self.params['martingale_multiplier']
-        max_steps = self.params['max_martingale_steps']
+        base = self.params["position_size"]
+        mult = self.params["martingale_multiplier"]
+        max_steps = self.params["max_martingale_steps"]
         step = min(self.martingale_step, max_steps)
-        return base * (mult ** step)
+        return base * (mult**step)
 
     def on_trade_completed(self, trade_record: Dict[str, Any]):
-        profit = trade_record.get('profit', 0)
-        exit_reason = trade_record.get('exit_reason')
+        profit = trade_record.get("profit", 0)
+        exit_reason = trade_record.get("exit_reason")
 
         if profit < 0:
             self.consecutive_losses += 1
-            if self.consecutive_losses >= 2 and self.martingale_step < self.params['max_martingale_steps']:
+            if (
+                self.consecutive_losses >= 2
+                and self.martingale_step < self.params["max_martingale_steps"]
+            ):
                 self.martingale_step += 1
                 self.consecutive_losses = 0
         else:
@@ -109,36 +113,55 @@ class MeanReversionMartingaleStrategy(BaseStrategy):
             if self.martingale_step > 0:
                 self.martingale_step -= 1
 
-        if exit_reason in [ExitReason.SIGNAL_REVERSE, ExitReason.FORCE_CLOSE, ExitReason.END_OF_DATA]:
+        if exit_reason in [
+            ExitReason.SIGNAL_REVERSE,
+            ExitReason.FORCE_CLOSE,
+            ExitReason.END_OF_DATA,
+        ]:
             self.current_position = None
             self.entry_price = None
 
-    def generate_signal(self, df: pd.DataFrame, current_idx: int, **kwargs) -> Optional[TradeSignal]:
-        min_bars = max(self.params['bb_period'], self.params['rsi_period'], self.params['atr_period']) + 10
+    def generate_signal(
+        self, df: pd.DataFrame, current_idx: int, **kwargs
+    ) -> Optional[TradeSignal]:
+        min_bars = (
+            max(
+                self.params["bb_period"],
+                self.params["rsi_period"],
+                self.params["atr_period"],
+            )
+            + 10
+        )
         if current_idx < min_bars:
             return None
 
         prev_bar = df.iloc[current_idx - 1]
         current_bar = df.iloc[current_idx]
         timestamp = df.index[current_idx]
-        current_open = current_bar['Open']
+        current_open = current_bar["Open"]
 
         # 获取指标
-        bb_upper = prev_bar.get('BB_Upper', 0)
-        bb_lower = prev_bar.get('BB_Lower', 0)
-        bb_middle = prev_bar.get('BB_Middle', 0)
-        rsi = prev_bar.get('RSI', 50)
-        close = prev_bar['Close']
-        atr = prev_bar.get('ATR', 0)
+        bb_upper = prev_bar.get("BB_Upper", 0)
+        bb_lower = prev_bar.get("BB_Lower", 0)
+        bb_middle = prev_bar.get("BB_Middle", 0)
+        rsi = prev_bar.get("RSI", 50)
+        close = prev_bar["Close"]
+        atr = prev_bar.get("ATR", 0)
 
-        if pd.isna(bb_upper) or pd.isna(bb_lower) or pd.isna(rsi) or pd.isna(atr) or atr <= 0:
+        if (
+            pd.isna(bb_upper)
+            or pd.isna(bb_lower)
+            or pd.isna(rsi)
+            or pd.isna(atr)
+            or atr <= 0
+        ):
             return None
 
         signal = None
-        sl_mult = self.params['stop_loss_atr']
-        tp_mult = self.params['take_profit_atr']
-        rsi_lower = self.params['rsi_oversold']
-        rsi_upper = self.params['rsi_overbought']
+        sl_mult = self.params["stop_loss_atr"]
+        tp_mult = self.params["take_profit_atr"]
+        rsi_lower = self.params["rsi_oversold"]
+        rsi_upper = self.params["rsi_overbought"]
 
         # === 无持仓时入场 ===
         if self.current_position is None:
@@ -228,21 +251,21 @@ def calculate_mean_reversion_indicators(
     bb_period: int = 20,
     bb_std: float = 2.0,
     rsi_period: int = 14,
-    atr_period: int = 14
+    atr_period: int = 14,
 ) -> pd.DataFrame:
     """计算均值回归策略所需指标"""
     result = df.copy()
 
     # BB
-    upper, middle, lower = calculate_bollinger_bands(result['Close'], bb_period, bb_std)
-    result['BB_Upper'] = upper
-    result['BB_Middle'] = middle
-    result['BB_Lower'] = lower
+    upper, middle, lower = calculate_bollinger_bands(result["Close"], bb_period, bb_std)
+    result["BB_Upper"] = upper
+    result["BB_Middle"] = middle
+    result["BB_Lower"] = lower
 
     # RSI
-    result['RSI'] = calculate_rsi(result['Close'], rsi_period)
+    result["RSI"] = calculate_rsi(result["Close"], rsi_period)
 
     # ATR
-    result['ATR'] = calculate_atr(result, atr_period)
+    result["ATR"] = calculate_atr(result, atr_period)
 
     return result

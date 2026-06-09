@@ -48,10 +48,7 @@ class BaseStrategy(ABC):
 
     @abstractmethod
     def generate_signal(
-        self,
-        df: pd.DataFrame,
-        current_idx: int,
-        **kwargs
+        self, df: pd.DataFrame, current_idx: int, **kwargs
     ) -> Union[TradeSignal, List[TradeSignal], None]:
         """
         生成交易信号
@@ -153,12 +150,12 @@ class BaseStrategy(ABC):
     def get_state(self) -> Dict[str, Any]:
         """获取策略当前状态"""
         return {
-            'strategy_id': self.strategy_id,
-            'is_active': self.is_active,
-            'params': self.params.copy(),
-            'total_signals': self.total_signals,
-            'long_signals': self.long_signals,
-            'short_signals': self.short_signals,
+            "strategy_id": self.strategy_id,
+            "is_active": self.is_active,
+            "params": self.params.copy(),
+            "total_signals": self.total_signals,
+            "long_signals": self.long_signals,
+            "short_signals": self.short_signals,
         }
 
     def _create_signal(
@@ -205,7 +202,11 @@ class BaseStrategy(ABC):
         if extra_metadata:
             metadata.update(extra_metadata)
         if size is None:
-            size = metadata.get('size', self.params.get('position_size', 1.0)) if metadata else self.params.get('position_size', 1.0)
+            size = (
+                metadata.get("size", self.params.get("position_size", 1.0))
+                if metadata
+                else self.params.get("position_size", 1.0)
+            )
 
         signal = TradeSignal(
             timestamp=timestamp,
@@ -216,11 +217,11 @@ class BaseStrategy(ABC):
             stop_loss=stop_loss,
             take_profit=take_profit,
             size=size,
-            risk_per_trade=self.params.get('risk_per_trade', 0.01),
+            risk_per_trade=self.params.get("risk_per_trade", 0.01),
             reason=reason,
             metadata=metadata,
             signal_bar_index=signal_bar_idx,
-            execution_bar_index=execution_bar_idx
+            execution_bar_index=execution_bar_idx,
         )
 
         # 更新统计
@@ -236,7 +237,9 @@ class BaseStrategy(ABC):
         return signal
 
     def __repr__(self) -> str:
-        return f"{self.__class__.__name__}(id={self.strategy_id}, active={self.is_active})"
+        return (
+            f"{self.__class__.__name__}(id={self.strategy_id}, active={self.is_active})"
+        )
 
 
 class StrategyRegistry:
@@ -264,10 +267,7 @@ class StrategyRegistry:
 
     @classmethod
     def create(
-        cls,
-        name: str,
-        params: Optional[Dict[str, Any]] = None,
-        strategy_id: str = ""
+        cls, name: str, params: Optional[Dict[str, Any]] = None, strategy_id: str = ""
     ) -> BaseStrategy:
         """
         创建策略实例
@@ -282,7 +282,9 @@ class StrategyRegistry:
         """
         strategy_class = cls.get(name)
         if strategy_class is None:
-            raise ValueError(f"Unknown strategy: {name}. Available: {list(cls._strategies.keys())}")
+            raise ValueError(
+                f"Unknown strategy: {name}. Available: {list(cls._strategies.keys())}"
+            )
 
         return strategy_class(params=params, strategy_id=strategy_id)
 
@@ -302,17 +304,20 @@ class StrategyRegistry:
         try:
             temp_instance = strategy_class()
             return {
-                'name': name,
-                'class': strategy_class.__name__,
-                'default_params': temp_instance.get_default_params(),
-                'param_bounds': temp_instance.get_param_bounds(),
-                'doc': strategy_class.__doc__
+                "name": name,
+                "class": strategy_class.__name__,
+                "default_params": temp_instance.get_default_params(),
+                "param_bounds": temp_instance.get_param_bounds(),
+                "doc": strategy_class.__doc__,
             }
         except Exception as e:
             import logging
-            logging.getLogger(__name__).warning(f"Failed to get strategy info for {name}: {e}")
+
+            logging.getLogger(__name__).warning(
+                f"Failed to get strategy info for {name}: {e}"
+            )
             return {
-                'name': name,
-                'class': strategy_class.__name__,
-                'doc': strategy_class.__doc__
+                "name": name,
+                "class": strategy_class.__name__,
+                "doc": strategy_class.__doc__,
             }

@@ -22,7 +22,10 @@ Dollar Trader 策略 - 三线SMA趋势跟踪
 from typing import Dict, List, Optional, Any
 import pandas as pd
 
-from strategies.dollar_trader_base import DollarTraderBaseStrategy, calculate_dollar_trader_base_indicators
+from strategies.dollar_trader_base import (
+    DollarTraderBaseStrategy,
+    calculate_dollar_trader_base_indicators,
+)
 from core.indicators import calculate_sma
 
 
@@ -53,26 +56,23 @@ class DollarTraderStrategy(DollarTraderBaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         """返回默认参数"""
         return {
-            'sma_short': 20,
-            'sma_medium': 50,
-            'sma_long': 200,
-            'position_size': 1.0,  # 固定手数
+            "sma_short": 20,
+            "sma_medium": 50,
+            "sma_long": 200,
+            "position_size": 1.0,  # 固定手数
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         """返回参数优化范围"""
         return {
-            'sma_short': (10, 30),
-            'sma_medium': (30, 70),
-            'sma_long': (100, 300),
+            "sma_short": (10, 30),
+            "sma_medium": (30, 70),
+            "sma_long": (100, 300),
         }
 
 
 def calculate_dollar_trader_indicators(
-    df: pd.DataFrame,
-    sma_short: int = 20,
-    sma_medium: int = 50,
-    sma_long: int = 200
+    df: pd.DataFrame, sma_short: int = 20, sma_medium: int = 50, sma_long: int = 200
 ) -> pd.DataFrame:
     """
     计算Dollar Trader策略所需的所有指标

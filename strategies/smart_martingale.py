@@ -22,8 +22,11 @@ from datetime import datetime
 from strategies.base import BaseStrategy
 from core.types import TradeSignal, TradeDirection, SignalType, ExitReason
 from core.indicators import (
-    calculate_sma, calculate_atr, calculate_adx,
-    calculate_bollinger_bands, calculate_rsi
+    calculate_sma,
+    calculate_atr,
+    calculate_adx,
+    calculate_bollinger_bands,
+    calculate_rsi,
 )
 
 
@@ -48,59 +51,57 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
     def get_default_params(self) -> Dict[str, Any]:
         return {
             # 市场状态参数
-            'adx_threshold': 25,
-            'trend_price_bias': 0.55,  # 价格>SMA的比例阈值
-
+            "adx_threshold": 25,
+            "trend_price_bias": 0.55,  # 价格>SMA的比例阈值
             # 趋势策略参数
-            'ema_fast': 20,
-            'ema_slow': 50,
-            'ema_trend': 100,
-
+            "ema_fast": 20,
+            "ema_slow": 50,
+            "ema_trend": 100,
             # 均值回归参数
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'rsi_period': 14,
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-
+            "bb_period": 20,
+            "bb_std": 2.0,
+            "rsi_period": 14,
+            "rsi_oversold": 30,
+            "rsi_overbought": 70,
             # 止损止盈
-            'atr_period': 14,
-            'trend_sl_atr': 2.0,
-            'trend_tp_atr': 4.0,
-            'range_sl_atr': 1.5,
-            'range_tp_atr': 2.5,
-
+            "atr_period": 14,
+            "trend_sl_atr": 2.0,
+            "trend_tp_atr": 4.0,
+            "range_sl_atr": 1.5,
+            "range_tp_atr": 2.5,
             # 马丁参数
-            'position_size': 0.01,
-            'martingale_multiplier': 1.5,
-            'max_martingale_steps': 4,
+            "position_size": 0.01,
+            "martingale_multiplier": 1.5,
+            "max_martingale_steps": 4,
         }
 
     def get_param_bounds(self) -> Dict[str, tuple]:
         return {
-            'adx_threshold': (20, 30),
-            'ema_fast': (15, 30),
-            'ema_slow': (40, 70),
-            'bb_period': (15, 25),
-            'bb_std': (1.8, 2.5),
-            'rsi_oversold': (25, 35),
-            'rsi_overbought': (65, 75),
-            'trend_sl_atr': (1.5, 3.0),
-            'trend_tp_atr': (3.0, 6.0),
-            'range_sl_atr': (1.0, 2.0),
-            'range_tp_atr': (2.0, 4.0),
-            'martingale_multiplier': (1.3, 2.0),
-            'max_martingale_steps': (2, 6),
+            "adx_threshold": (20, 30),
+            "ema_fast": (15, 30),
+            "ema_slow": (40, 70),
+            "bb_period": (15, 25),
+            "bb_std": (1.8, 2.5),
+            "rsi_oversold": (25, 35),
+            "rsi_overbought": (65, 75),
+            "trend_sl_atr": (1.5, 3.0),
+            "trend_tp_atr": (3.0, 6.0),
+            "range_sl_atr": (1.0, 2.0),
+            "range_tp_atr": (2.0, 4.0),
+            "martingale_multiplier": (1.3, 2.0),
+            "max_martingale_steps": (2, 6),
         }
 
     def _calculate_position_size(self) -> float:
-        base = self.params['position_size']
-        mult = self.params['martingale_multiplier']
-        max_steps = self.params['max_martingale_steps']
+        base = self.params["position_size"]
+        mult = self.params["martingale_multiplier"]
+        max_steps = self.params["max_martingale_steps"]
         step = min(self.martingale_step, max_steps)
-        return base * (mult ** step)
+        return base * (mult**step)
 
-    def _detect_market_state(self, df: pd.DataFrame, current_idx: int, lookback: int = 100) -> str:
+    def _detect_market_state(
+        self, df: pd.DataFrame, current_idx: int, lookback: int = 100
+    ) -> str:
         """
         检测市场状态
 
@@ -108,37 +109,40 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
             'trending' 或 'ranging'
         """
         if current_idx < lookback:
-            return 'ranging'  # 默认震荡
+            return "ranging"  # 默认震荡
 
-        recent = df.iloc[current_idx - lookback:current_idx]
+        recent = df.iloc[current_idx - lookback : current_idx]
         prev_bar = df.iloc[current_idx - 1]
 
         # 获取指标
-        adx = prev_bar.get('ADX', 0)
-        ema_fast = prev_bar.get('EMA_fast', 0)
-        ema_slow = prev_bar.get('EMA_slow', 0)
-        close = prev_bar['Close']
+        adx = prev_bar.get("ADX", 0)
+        ema_fast = prev_bar.get("EMA_fast", 0)
+        ema_slow = prev_bar.get("EMA_slow", 0)
+        close = prev_bar["Close"]
 
         if pd.isna(adx) or pd.isna(ema_fast) or pd.isna(ema_slow):
-            return 'ranging'
+            return "ranging"
 
         # 判断趋势
-        is_trending = adx > self.params['adx_threshold']
+        is_trending = adx > self.params["adx_threshold"]
         price_above_slow = close > ema_slow
         ema_aligned = ema_fast > ema_slow
 
         if is_trending and (price_above_slow == ema_aligned):
-            return 'trending'
+            return "trending"
         else:
-            return 'ranging'
+            return "ranging"
 
     def on_trade_completed(self, trade_record: Dict[str, Any]):
-        profit = trade_record.get('profit', 0)
-        exit_reason = trade_record.get('exit_reason')
+        profit = trade_record.get("profit", 0)
+        exit_reason = trade_record.get("exit_reason")
 
         if profit < 0:
             self.consecutive_losses += 1
-            if self.consecutive_losses >= 2 and self.martingale_step < self.params['max_martingale_steps']:
+            if (
+                self.consecutive_losses >= 2
+                and self.martingale_step < self.params["max_martingale_steps"]
+            ):
                 self.martingale_step += 1
                 self.consecutive_losses = 0
         else:
@@ -146,22 +150,28 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
             if self.martingale_step > 0:
                 self.martingale_step -= 1
 
-        if exit_reason in [ExitReason.SIGNAL_REVERSE, ExitReason.FORCE_CLOSE, ExitReason.END_OF_DATA]:
+        if exit_reason in [
+            ExitReason.SIGNAL_REVERSE,
+            ExitReason.FORCE_CLOSE,
+            ExitReason.END_OF_DATA,
+        ]:
             self.current_position = None
             self.entry_price = None
 
-    def _generate_trend_signal(self, df, current_idx, prev_bar, current_open, atr, timestamp):
+    def _generate_trend_signal(
+        self, df, current_idx, prev_bar, current_open, atr, timestamp
+    ):
         """趋势跟踪信号"""
-        ema_fast = prev_bar.get('EMA_fast', 0)
-        ema_slow = prev_bar.get('EMA_slow', 0)
-        ema_trend = prev_bar.get('EMA_trend', 0)
-        close = prev_bar['Close']
+        ema_fast = prev_bar.get("EMA_fast", 0)
+        ema_slow = prev_bar.get("EMA_slow", 0)
+        ema_trend = prev_bar.get("EMA_trend", 0)
+        close = prev_bar["Close"]
 
         if pd.isna(ema_fast) or pd.isna(ema_slow):
             return None
 
-        sl_mult = self.params['trend_sl_atr']
-        tp_mult = self.params['trend_tp_atr']
+        sl_mult = self.params["trend_sl_atr"]
+        tp_mult = self.params["trend_tp_atr"]
 
         signal = None
 
@@ -237,21 +247,23 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
 
         return signal
 
-    def _generate_range_signal(self, df, current_idx, prev_bar, current_open, atr, timestamp):
+    def _generate_range_signal(
+        self, df, current_idx, prev_bar, current_open, atr, timestamp
+    ):
         """均值回归信号"""
-        bb_upper = prev_bar.get('BB_Upper', 0)
-        bb_lower = prev_bar.get('BB_Lower', 0)
-        bb_middle = prev_bar.get('BB_Middle', 0)
-        rsi = prev_bar.get('RSI', 50)
-        close = prev_bar['Close']
+        bb_upper = prev_bar.get("BB_Upper", 0)
+        bb_lower = prev_bar.get("BB_Lower", 0)
+        bb_middle = prev_bar.get("BB_Middle", 0)
+        rsi = prev_bar.get("RSI", 50)
+        close = prev_bar["Close"]
 
         if pd.isna(bb_upper) or pd.isna(bb_lower) or pd.isna(rsi):
             return None
 
-        sl_mult = self.params['range_sl_atr']
-        tp_mult = self.params['range_tp_atr']
-        rsi_lower = self.params['rsi_oversold']
-        rsi_upper = self.params['rsi_overbought']
+        sl_mult = self.params["range_sl_atr"]
+        tp_mult = self.params["range_tp_atr"]
+        rsi_lower = self.params["rsi_oversold"]
+        rsi_upper = self.params["rsi_overbought"]
 
         signal = None
 
@@ -327,7 +339,9 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
 
         return signal
 
-    def generate_signal(self, df: pd.DataFrame, current_idx: int, **kwargs) -> Optional[TradeSignal]:
+    def generate_signal(
+        self, df: pd.DataFrame, current_idx: int, **kwargs
+    ) -> Optional[TradeSignal]:
         min_bars = 150  # 需要足够数据检测市场状态
         if current_idx < min_bars:
             return None
@@ -335,10 +349,10 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
         prev_bar = df.iloc[current_idx - 1]
         current_bar = df.iloc[current_idx]
         timestamp = df.index[current_idx]
-        current_open = current_bar['Open']
+        current_open = current_bar["Open"]
 
         # ATR
-        atr = prev_bar.get('ATR', 0)
+        atr = prev_bar.get("ATR", 0)
         if pd.isna(atr) or atr <= 0:
             return None
 
@@ -346,10 +360,14 @@ class SmartAdaptiveMartingaleStrategy(BaseStrategy):
         self.market_state = self._detect_market_state(df, current_idx)
 
         # 根据市场状态选择策略
-        if self.market_state == 'trending':
-            return self._generate_trend_signal(df, current_idx, prev_bar, current_open, atr, timestamp)
+        if self.market_state == "trending":
+            return self._generate_trend_signal(
+                df, current_idx, prev_bar, current_open, atr, timestamp
+            )
         else:
-            return self._generate_range_signal(df, current_idx, prev_bar, current_open, atr, timestamp)
+            return self._generate_range_signal(
+                df, current_idx, prev_bar, current_open, atr, timestamp
+            )
 
     def reset(self):
         super().reset()
@@ -369,30 +387,30 @@ def calculate_smart_indicators(
     bb_std: float = 2.0,
     rsi_period: int = 14,
     atr_period: int = 14,
-    adx_period: int = 14
+    adx_period: int = 14,
 ) -> pd.DataFrame:
     """计算智能策略所需指标"""
     result = df.copy()
 
     # EMA
-    result['EMA_fast'] = calculate_sma(result['Close'], ema_fast)
-    result['EMA_slow'] = calculate_sma(result['Close'], ema_slow)
-    result['EMA_trend'] = calculate_sma(result['Close'], ema_trend)
+    result["EMA_fast"] = calculate_sma(result["Close"], ema_fast)
+    result["EMA_slow"] = calculate_sma(result["Close"], ema_slow)
+    result["EMA_trend"] = calculate_sma(result["Close"], ema_trend)
 
     # BB
-    upper, middle, lower = calculate_bollinger_bands(result['Close'], bb_period, bb_std)
-    result['BB_Upper'] = upper
-    result['BB_Middle'] = middle
-    result['BB_Lower'] = lower
+    upper, middle, lower = calculate_bollinger_bands(result["Close"], bb_period, bb_std)
+    result["BB_Upper"] = upper
+    result["BB_Middle"] = middle
+    result["BB_Lower"] = lower
 
     # RSI
-    result['RSI'] = calculate_rsi(result['Close'], rsi_period)
+    result["RSI"] = calculate_rsi(result["Close"], rsi_period)
 
     # ATR
-    result['ATR'] = calculate_atr(result, atr_period)
+    result["ATR"] = calculate_atr(result, atr_period)
 
     # ADX
     adx, plus_di, minus_di = calculate_adx(result, adx_period)
-    result['ADX'] = adx
+    result["ADX"] = adx
 
     return result

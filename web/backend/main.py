@@ -33,7 +33,7 @@ app = FastAPI(
     title="XAUUSD Backtest System",
     description="Web interface for XAUUSD dual-strategy backtesting and optimization",
     version="2.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS configuration
@@ -69,7 +69,7 @@ async def version_info():
             "bayesian_optimization": True,
             "walk_forward_validation": True,
             "dollar_trader_strategy": True,
-        }
+        },
     }
 
 
@@ -80,10 +80,7 @@ async def list_strategies():
     info = {}
     for name in strategies:
         info[name] = StrategyRegistry.get_info(name)
-    return {
-        "strategies": strategies,
-        "info": info
-    }
+    return {"strategies": strategies, "info": info}
 
 
 @app.get("/api/config")
@@ -93,7 +90,7 @@ async def get_default_config():
     return {
         "strategy": config.strategy.to_dict(),
         "trading": config.trading.model_dump(),
-        "optimization": config.optimization.model_dump()
+        "optimization": config.optimization.model_dump(),
     }
 
 
@@ -120,27 +117,23 @@ async def serve_spa(request: Request, full_path: str):
     """Serve the SPA index.html for all non-API routes with no-cache headers"""
     index_file = os.path.join(frontend_dist, "index.html")
     if os.path.exists(index_file):
-        with open(index_file, 'r', encoding='utf-8') as f:
+        with open(index_file, "r", encoding="utf-8") as f:
             html_content = f.read()
         return HTMLResponse(
             content=html_content,
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
-                "Expires": "0"
-            }
+                "Expires": "0",
+            },
         )
     return {
         "error": "Frontend not built",
-        "message": "Web API is available. Use /api/health and /api/version for status."
+        "message": "Web API is available. Use /api/health and /api/version for status.",
     }
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
