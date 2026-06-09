@@ -16,6 +16,7 @@ import numpy as np
 
 from .base import BaseStrategy
 from core.types import TradeSignal, TradeDirection
+from core.config import get_config
 
 
 class MeanReversionStrategy(BaseStrategy):
@@ -35,6 +36,11 @@ class MeanReversionStrategy(BaseStrategy):
         self.stop_loss_mult = self.params.get('stop_loss_atr_mult_a', 1.0)
         self.max_hold_bars = self.params.get('max_hold_bars_a', 5)
         self.use_vwap_exit = self.params.get('use_vwap_exit', True)
+
+        # 从全局配置读取交易时段（北京时间）
+        config = get_config()
+        self.asian_session_start = config.trading.asian_session_start
+        self.asian_session_end = config.trading.asian_session_end
 
     def get_default_params(self) -> Dict[str, Any]:
         """获取默认参数"""
@@ -165,9 +171,14 @@ class MeanReversionStrategy(BaseStrategy):
         return None
 
     def _is_asian_session(self, timestamp) -> bool:
-        """检查是否为亚盘时段（北京时间6:00-14:00）"""
-        hour = timestamp.hour
-        return 6 <= hour < 14
+        """检查是否为亚盘时段（北京时间）"""
+        # 数据索引为UTC时间，需转换为北京时间（UTC+8）
+        if hasattr(timestamp, 'tz') and timestamp.tz is not None:
+            ts_local = timestamp.tz_convert('Asia/Shanghai')
+        else:
+            ts_local = timestamp
+        hour = ts_local.hour
+        return self.asian_session_start <= hour < self.asian_session_end
 
     def _is_abnormal_volatility(self, df: pd.DataFrame, current_idx: int) -> bool:
         """检查是否出现异常波动"""

@@ -16,6 +16,7 @@ import numpy as np
 
 from .base import BaseStrategy
 from core.types import TradeSignal, TradeDirection
+from core.config import get_config
 
 
 class MomentumBreakoutStrategy(BaseStrategy):
@@ -36,6 +37,11 @@ class MomentumBreakoutStrategy(BaseStrategy):
         self.trailing_mult = self.params.get('trailing_stop_atr_mult', 2.5)
         self.use_trailing_stop = self.params.get('use_trailing_stop', True)
         self.entry_mode = self.params.get('strategy_b_mode', 0)  # 0=自动, 1=强制回踩
+
+        # 从全局配置读取交易时段（北京时间）
+        config = get_config()
+        self.european_session_start = config.trading.european_session_start
+        self.european_session_end = config.trading.european_session_end
 
         # 状态追踪
         self.pending_signal = None
@@ -176,5 +182,11 @@ class MomentumBreakoutStrategy(BaseStrategy):
 
     def _is_european_session(self, timestamp) -> bool:
         """检查是否为欧美盘时段（北京时间15:00-次日2:00）"""
-        hour = timestamp.hour
-        return hour >= 15 or hour < 2
+        # 数据索引为UTC时间，需转换为北京时间（UTC+8）
+        if hasattr(timestamp, 'tz') and timestamp.tz is not None:
+            ts_local = timestamp.tz_convert('Asia/Shanghai')
+        else:
+            ts_local = timestamp
+        hour = ts_local.hour
+        # 欧美盘跨天：15:00-24:00 或 00:00-02:00
+        return hour >= self.european_session_start or hour < 2
