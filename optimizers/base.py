@@ -82,38 +82,46 @@ class BaseOptimizer(ABC):
         """
         pass
 
-    def calculate_fitness(self, result: Dict[str, Any]) -> float:
+    def calculate_fitness(self, result) -> float:
         """
         计算适应度值
 
         Args:
-            result: 回测结果字典
+            result: 回测结果（dict 或 BacktestResult 对象）
 
         Returns:
             适应度值（越高越好）
         """
+        # 统一从 dict 或 BacktestResult 中提取字段
+        def _get(attr, default=0):
+            if hasattr(result, attr):
+                return getattr(result, attr)
+            if isinstance(result, dict):
+                return result.get(attr, default)
+            return default
+
         # 检查最小交易次数
-        if result.get('total_trades', 0) < self.min_trades:
+        if _get('total_trades', 0) < self.min_trades:
             return -float('inf')
 
         target = self.optimization_target
 
         if target == 'sharpe':
-            return result.get('sharpe_ratio', 0)
+            return _get('sharpe_ratio', 0)
         elif target == 'calmar':
-            return result.get('calmar_ratio', 0)
+            return _get('calmar_ratio', 0)
         elif target == 'profit_factor':
-            return result.get('profit_factor', 0)
+            return _get('profit_factor', 0)
         elif target == 'win_rate':
-            return result.get('win_rate', 0)
+            return _get('win_rate', 0)
         elif target == 'total_return':
-            return result.get('total_return', 0)
+            return _get('total_return', 0)
         else:
             # 综合评分
-            sharpe = result.get('sharpe_ratio', 0)
-            calmar = result.get('calmar_ratio', 0)
-            pf = result.get('profit_factor', 0)
-            win_rate = result.get('win_rate', 0)
+            sharpe = _get('sharpe_ratio', 0)
+            calmar = _get('calmar_ratio', 0)
+            pf = _get('profit_factor', 0)
+            win_rate = _get('win_rate', 0)
 
             # 加权综合
             score = (

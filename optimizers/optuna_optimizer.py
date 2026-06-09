@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import warnings
+from threading import Lock
 
 from .base import BaseOptimizer, OptimizationCallback
 from core.types import OptimizationResult
@@ -110,9 +111,10 @@ class OptunaOptimizer(BaseOptimizer):
             sampler=sampler
         )
 
-        # 早停计数器
+        # 早停计数器（使用线程锁保护，避免并行竞争条件）
         best_value = -float('inf')
         no_improvement_count = 0
+        _stop_lock = Lock()
 
         def optuna_objective(trial) -> float:
             nonlocal best_value, no_improvement_count
@@ -124,19 +126,20 @@ class OptunaOptimizer(BaseOptimizer):
             try:
                 fitness = objective_func(params)
             except Exception as e:
-                # 评估失败时报告负无穷并剪枝该 trial
-                trial.report(float('-inf'), step=0)
+                # 评估失败时剪枝该 trial
                 raise optuna.TrialPruned() from e
 
-            # 早停检查
+            # 早停检查（线程安全）
             if self.early_stopping:
-                if fitness > best_value:
-                    best_value = fitness
-                    no_improvement_count = 0
-                else:
-                    no_improvement_count += 1
+                with _stop_lock:
+                    if fitness > best_value:
+                        best_value = fitness
+                        no_improvement_count = 0
+                    else:
+                        no_improvement_count += 1
+                    should_stop = no_improvement_count >= self.patience
 
-                if no_improvement_count >= self.patience:
+                if should_stop:
                     trial.study.stop()
 
             # 回调
