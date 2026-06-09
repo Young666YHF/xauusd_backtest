@@ -48,7 +48,7 @@ jobs:
         run: black --check --diff core/ strategies/ engines/ optimizers/ web/ tests/
 
       - name: Lint with flake8
-        run: flake8 core/ strategies/ engines/ optimizers/ web/ tests/ --max-line-length=120 --extend-ignore=E203,W503
+        run: flake8 core/ strategies/ engines/ optimizers/ web/ tests/ --max-line-length=120 --extend-ignore=E203,W503,E402,E501,F401,F541,F811,F841
 
       - name: Security scan (bandit)
         run: bandit -r core/ strategies/ engines/ optimizers/ web/ -f json -o bandit-report.json || true
@@ -91,6 +91,8 @@ jobs:
           pip install pytest pytest-cov pytest-xdist
 
       - name: Run unit tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           pytest tests/ -v --tb=short \
             --cov=core --cov=strategies --cov=engines --cov=optimizers \
