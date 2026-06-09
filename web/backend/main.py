@@ -98,7 +98,10 @@ async def get_default_config():
 
 
 # Import and include dollar trader routes
-from api.dollar_trader import router as dollar_trader_router
+try:
+    from .api.dollar_trader import router as dollar_trader_router
+except ImportError:
+    from api.dollar_trader import router as dollar_trader_router
 app.include_router(dollar_trader_router)
 
 
